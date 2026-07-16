@@ -118,6 +118,11 @@ impl RuntimeManager {
         record: &RuntimeRecord,
         installed_store: Arc<Mutex<InstalledStore>>,
     ) -> AppResult<()> {
+        if pending_launch(record) {
+            return Err(AppError::Runtime(
+                "上次的 Codex CDP 启动未完成；请先恢复原生后重试".into(),
+            ));
+        }
         let install = CodexInstall::discover()?;
         validate_saved_install(&install, record)?;
         verify_endpoint(&self.http, &install, record).await?;
@@ -331,7 +336,7 @@ impl RuntimeManager {
                         .await;
                 }
             };
-            let mut child = match install.launch_with_cdp(port) {
+            let child = match install.launch_with_cdp(port) {
                 Ok(child) => child,
                 Err(error) => {
                     return self
@@ -345,26 +350,27 @@ impl RuntimeManager {
                         .await;
                 }
             };
-            let ready = wait_until_ready(&self.http, &install, port).await;
-            let (browser_id, _) = match ready {
-                Ok(ready) => ready,
-                Err(error) => {
-                    let _ = install.stop(Some(&mut child));
-                    let _ = install.launch_normally();
-                    return self.fail_start(&installed, error.to_string()).await;
-                }
-            };
-            let record = RuntimeRecord {
+            let mut record = RuntimeRecord {
                 schema_version: RUNTIME_SCHEMA,
                 source_id: installed.source_id.clone(),
                 skin_id: installed.skin_id.clone(),
                 version: installed.version.clone(),
                 port,
-                browser_id,
+                browser_id: String::new(),
                 platform: install.platform.clone(),
                 executable: install.executable.to_string_lossy().into_owned(),
                 codex_identity: install.identity.clone(),
             };
+            let ready = wait_until_ready(&self.http, &install, port).await;
+            let (browser_id, _) = match ready {
+                Ok(ready) => ready,
+                Err(error) => {
+                    return self
+                        .abort_failed_launch(&installed, record, install, child, error.to_string())
+                        .await;
+                }
+            };
+            record.browser_id = browser_id;
             if let Err(error) = cdp::apply_to_verified_targets(
                 &self.http,
                 record.port,
@@ -373,9 +379,9 @@ impl RuntimeManager {
             )
             .await
             {
-                let _ = install.stop(Some(&mut child));
-                let _ = install.launch_normally();
-                return self.fail_start(&installed, error.to_string()).await;
+                return self
+                    .abort_failed_launch(&installed, record, install, child, error.to_string())
+                    .await;
             }
             (record, install, Some(child))
         };
@@ -427,8 +433,12 @@ impl RuntimeManager {
             },
         };
         let install_matches_saved = validate_saved_install(&install, &record).is_ok();
-        let verified =
-            install_matches_saved && verify_endpoint(&self.http, &install, &record).await.is_ok();
+        let verified = install_matches_saved
+            && if pending_launch(&record) {
+                install.is_running().unwrap_or(false)
+            } else {
+                verify_endpoint(&self.http, &install, &record).await.is_ok()
+            };
         if !verified {
             let saved_process_running =
                 CodexInstall::saved_executable_is_running(&record.platform, &record.executable);
@@ -462,8 +472,10 @@ impl RuntimeManager {
             return Ok(status);
         }
 
-        let _ =
-            cdp::remove_from_verified_targets(&self.http, record.port, &record.browser_id).await;
+        if !pending_launch(&record) {
+            let _ = cdp::remove_from_verified_targets(&self.http, record.port, &record.browser_id)
+                .await;
+        }
         if let Err(error) = install.stop(child.as_mut()) {
             let mut inner = self.inner.lock().await;
             inner.record = Some(record.clone());
@@ -592,6 +604,40 @@ impl RuntimeManager {
         Err(AppError::Runtime(message))
     }
 
+    async fn abort_failed_launch<T>(
+        &self,
+        installed: &InstalledSkin,
+        record: RuntimeRecord,
+        install: CodexInstall,
+        mut child: Child,
+        failure: impl Into<String>,
+    ) -> AppResult<T> {
+        let failure = failure.into();
+        if let Err(stop_error) = install.stop(Some(&mut child)) {
+            let persist_error = self.persist(Some(&record)).err();
+            let message = match persist_error {
+                Some(persist_error) => format!(
+                    "{failure}；停止 CDP Codex 也失败：{stop_error}；恢复记录无法保存：{persist_error}"
+                ),
+                None => format!(
+                    "{failure}；停止 CDP Codex 也失败：{stop_error}；未完成会话已保留，请使用恢复原生重试"
+                ),
+            };
+            return self
+                .fail_recoverable_session(record, Some(install), Some(child), message)
+                .await;
+        }
+        if let Err(relaunch_error) = install.launch_normally() {
+            return self
+                .fail_start(
+                    installed,
+                    format!("{failure}；CDP Codex 已停止，但恢复普通启动失败：{relaunch_error}"),
+                )
+                .await;
+        }
+        self.fail_start(installed, failure).await
+    }
+
     async fn fail_apply_attempt<T>(
         &self,
         installed: &InstalledSkin,
@@ -652,6 +698,10 @@ fn status_for_record(
         port: Some(record.port),
         message: message.into(),
     }
+}
+
+fn pending_launch(record: &RuntimeRecord) -> bool {
+    record.browser_id.is_empty()
 }
 
 fn validate_saved_install(install: &CodexInstall, record: &RuntimeRecord) -> AppResult<()> {
@@ -769,6 +819,22 @@ mod tests {
         assert!(validate_saved_install(&install, &record).is_ok());
         record.codex_identity = "other".into();
         assert!(validate_saved_install(&install, &record).is_err());
+    }
+
+    #[test]
+    fn empty_browser_identity_marks_an_unfinished_launch() {
+        let record = RuntimeRecord {
+            schema_version: 1,
+            source_id: "source".into(),
+            skin_id: "night".into(),
+            version: "1".into(),
+            port: 9341,
+            browser_id: String::new(),
+            platform: "macos".into(),
+            executable: "/Applications/Codex.app/test".into(),
+            codex_identity: "official".into(),
+        };
+        assert!(pending_launch(&record));
     }
 
     #[tokio::test]
