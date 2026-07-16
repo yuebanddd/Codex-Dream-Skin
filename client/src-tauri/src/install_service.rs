@@ -227,8 +227,8 @@ fn validate_css(css: &str) -> AppResult<()> {
     let normalized = normalize_css_escapes(&strip_css_comments(css));
     let blocked = [
         "@import",
-        "http://",
-        "https://",
+        "http:",
+        "https:",
         "file:",
         "javascript:",
         "-moz-binding",
@@ -401,6 +401,7 @@ mod tests {
     fn accepts_local_css_and_rejects_remote_imports() {
         assert!(validate_css("body { color: var(--accent); }").is_ok());
         assert!(validate_css("@import url(https://example.com/theme.css);").is_err());
+        assert!(validate_css("a { background: url(https:tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(  \t\n //tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(  \"//tracker.example/pixel\"); }").is_err());
