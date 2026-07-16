@@ -29,6 +29,12 @@ impl InstalledStore {
             .cloned()
     }
 
+    pub fn has_storage_collision(&self, source_id: &str, skin_id: &str) -> bool {
+        self.skins.iter().any(|skin| {
+            storage_keys_collide(&skin.source_id, &skin.skin_id, source_id, skin_id)
+        })
+    }
+
     pub fn upsert(&mut self, skin: InstalledSkin) -> AppResult<()> {
         if let Some(existing) = self
             .skins
@@ -56,5 +62,29 @@ impl InstalledStore {
         std::fs::write(&temporary, serde_json::to_vec_pretty(&self.skins)?)?;
         replace_file(&temporary, &self.path)?;
         Ok(())
+    }
+}
+
+fn storage_keys_collide(
+    existing_source_id: &str,
+    existing_skin_id: &str,
+    source_id: &str,
+    skin_id: &str,
+) -> bool {
+    existing_source_id.eq_ignore_ascii_case(source_id)
+        && existing_skin_id.eq_ignore_ascii_case(skin_id)
+        && (existing_source_id != source_id || existing_skin_id != skin_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::storage_keys_collide;
+
+    #[test]
+    fn detects_case_only_storage_collisions() {
+        assert!(storage_keys_collide("Foo", "bar", "foo", "bar"));
+        assert!(storage_keys_collide("foo", "Bar", "foo", "bar"));
+        assert!(!storage_keys_collide("foo", "bar", "foo", "bar"));
+        assert!(!storage_keys_collide("foo", "day", "foo", "night"));
     }
 }

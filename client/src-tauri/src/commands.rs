@@ -81,7 +81,15 @@ pub async fn install_skin(
     state: State<'_, AppState>,
 ) -> Result<InstalledSkin, String> {
     let _operation = state.theme_operation.lock().await;
-    let previous = state.installed.lock().await.get(&source_id, &skin_id);
+    let previous = {
+        let installed = state.installed.lock().await;
+        if installed.has_storage_collision(&source_id, &skin_id) {
+            return Err(format!(
+                "主题存储键与已安装主题仅大小写不同：{source_id}/{skin_id}"
+            ));
+        }
+        installed.get(&source_id, &skin_id)
+    };
     let skin = state
         .sources
         .lock()
