@@ -159,6 +159,7 @@ fn validate_skin_manifest(expected_id: &str, manifest: &SkinManifest) -> AppResu
         )));
     }
     validate_id(&manifest.id)?;
+    validate_storage_component(&manifest.version, "版本")?;
     if manifest.id != expected_id {
         return Err(AppError::InvalidManifest(format!(
             "皮肤索引 ID {expected_id} 与清单 ID {} 不一致",
@@ -184,14 +185,18 @@ fn validate_skin_manifest(expected_id: &str, manifest: &SkinManifest) -> AppResu
 }
 
 fn validate_id(value: &str) -> AppResult<()> {
+    validate_storage_component(value, "ID")
+}
+
+fn validate_storage_component(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
-        || matches!(value, "." | "..")
+        || value.starts_with('.')
         || value.len() > 80
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(AppError::InvalidManifest(format!("无效 ID：{value}")));
+        return Err(AppError::InvalidManifest(format!("无效{label}：{value}")));
     }
     Ok(())
 }
@@ -266,5 +271,6 @@ mod tests {
     fn rejects_dot_only_manifest_ids() {
         assert!(validate_id(".").is_err());
         assert!(validate_id("..").is_err());
+        assert!(validate_id(".night").is_err());
     }
 }
