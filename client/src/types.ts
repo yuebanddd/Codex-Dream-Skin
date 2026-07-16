@@ -37,3 +37,19 @@ export interface SourceRecord {
   refreshedAt: string;
   skins: CatalogSkin[];
 }
+
+export interface InstalledSkin {
+  sourceId: string;
+  sourceName: string;
+  skinId: string;
+  name: string;
+  version: string;
+  author: string;
+  installedAt: string;
+  installDir: string;
+  backgroundPath: string;
+  previewPath?: string;
+  cssPath?: string;
+  assetHashes: Record<string, string>;
+  manifest: SkinManifest;
+}

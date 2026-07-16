@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   Check,
   Download,
@@ -8,22 +9,29 @@ import {
   LoaderCircle,
   Monitor,
   Palette,
-  Play,
   RefreshCcw,
   RotateCcw,
   Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
-import { addSource, listSources, refreshSource, removeSource } from "./lib/api";
-import type { CatalogSkin, SourceRecord } from "./types";
+import {
+  addSource,
+  deleteInstalledSkin,
+  installSkin,
+  listInstalledSkins,
+  listSources,
+  refreshSource,
+  removeSource,
+} from "./lib/api";
+import type { CatalogSkin, InstalledSkin, SourceRecord } from "./types";
 
 type View = "wardrobe" | "import" | "restore";
 
 const featuredSkins: CatalogSkin[] = [
   {
     sourceId: "builtin-showcase",
-    sourceName: "Codex Dream Skin",
+    sourceName: "LumaDrobe Showcase",
     manifestPath: "skins/rose/skin.json",
     previewUrl:
       "https://raw.githubusercontent.com/yuebanddd/Codex-Dream-Skin/release/docs/images/gallery/skin-01.jpg",
@@ -42,7 +50,7 @@ const featuredSkins: CatalogSkin[] = [
   },
   {
     sourceId: "builtin-showcase",
-    sourceName: "Codex Dream Skin",
+    sourceName: "LumaDrobe Showcase",
     manifestPath: "skins/fiona/skin.json",
     previewUrl:
       "https://raw.githubusercontent.com/yuebanddd/Codex-Dream-Skin/release/docs/images/gallery/skin-07.jpg",
@@ -61,7 +69,7 @@ const featuredSkins: CatalogSkin[] = [
   },
   {
     sourceId: "builtin-showcase",
-    sourceName: "Codex Dream Skin",
+    sourceName: "LumaDrobe Showcase",
     manifestPath: "skins/stage/skin.json",
     previewUrl:
       "https://raw.githubusercontent.com/yuebanddd/Codex-Dream-Skin/release/docs/images/gallery/skin-08.jpg",
@@ -83,7 +91,8 @@ const featuredSkins: CatalogSkin[] = [
 function App() {
   const [view, setView] = useState<View>("wardrobe");
   const [sources, setSources] = useState<SourceRecord[]>([]);
-  const [selectedId, setSelectedId] = useState("stage");
+  const [installed, setInstalled] = useState<InstalledSkin[]>([]);
+  const [selectedId, setSelectedId] = useState("builtin-showcase:stage");
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -91,7 +100,12 @@ function App() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setSources(await listSources());
+      const [nextSources, nextInstalled] = await Promise.all([
+        listSources(),
+        listInstalledSkins(),
+      ]);
+      setSources(nextSources);
+      setInstalled(nextInstalled);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -107,9 +121,31 @@ function App() {
     () => sources.flatMap((source) => source.skins),
     [sources],
   );
-  const skins = remoteSkins.length ? remoteSkins : featuredSkins;
+  const installedOnlySkins = useMemo(() => {
+    const remoteKeys = new Set(
+      remoteSkins.map((skin) => `${skin.sourceId}:${skin.manifest.id}`),
+    );
+    return installed
+      .filter((skin) => !remoteKeys.has(`${skin.sourceId}:${skin.skinId}`))
+      .map<CatalogSkin>((skin) => ({
+        sourceId: skin.sourceId,
+        sourceName: skin.sourceName,
+        manifestPath: "local://skin.json",
+        previewUrl: convertFileSrc(skin.previewPath ?? skin.backgroundPath),
+        backgroundUrl: convertFileSrc(skin.backgroundPath),
+        cssUrl: skin.cssPath ? convertFileSrc(skin.cssPath) : undefined,
+        manifest: skin.manifest,
+      }));
+  }, [installed, remoteSkins]);
+  const catalogSkins = [...remoteSkins, ...installedOnlySkins];
+  const skins = catalogSkins.length ? catalogSkins : featuredSkins;
+  const skinKey = (skin: CatalogSkin) => `${skin.sourceId}:${skin.manifest.id}`;
   const selected =
-    skins.find((skin) => skin.manifest.id === selectedId) ?? skins[0];
+    skins.find((skin) => skinKey(skin) === selectedId) ?? skins[0];
+  const installedKeys = useMemo(
+    () => new Set(installed.map((skin) => `${skin.sourceId}:${skin.skinId}`)),
+    [installed],
+  );
 
   async function handleAdd(repositoryUrl: string) {
     setWorking("add");
@@ -120,7 +156,7 @@ function App() {
         ...current.filter((item) => item.id !== source.id),
         source,
       ]);
-      if (source.skins[0]) setSelectedId(source.skins[0].manifest.id);
+      if (source.skins[0]) setSelectedId(skinKey(source.skins[0]));
       setView("wardrobe");
     } catch (reason) {
       setError(String(reason));
@@ -155,9 +191,48 @@ function App() {
     }
   }
 
+  async function handleInstall(skin: CatalogSkin) {
+    const key = skinKey(skin);
+    setWorking(`install:${key}`);
+    setError("");
+    try {
+      const result = await installSkin(skin.sourceId, skin.manifest.id);
+      setInstalled((current) => [
+        ...current.filter(
+          (item) =>
+            item.sourceId !== result.sourceId || item.skinId !== result.skinId,
+        ),
+        result,
+      ]);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function handleDelete(skin: CatalogSkin) {
+    const key = skinKey(skin);
+    setWorking(`delete:${key}`);
+    setError("");
+    try {
+      await deleteInstalledSkin(skin.sourceId, skin.manifest.id);
+      setInstalled((current) =>
+        current.filter(
+          (item) =>
+            item.sourceId !== skin.sourceId || item.skinId !== skin.manifest.id,
+        ),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(null);
+    }
+  }
+
   return (
     <div className="atelier-shell">
-      <Sidebar view={view} count={skins.length} onNavigate={setView} />
+      <Sidebar view={view} count={installed.length} onNavigate={setView} />
       <main className="atelier-main">
         {error && <div className="error-toast">{error}</div>}
         {loading ? (
@@ -169,8 +244,12 @@ function App() {
           <Wardrobe
             skins={skins}
             selected={selected}
+            installedKeys={installedKeys}
+            working={working}
             onSelect={setSelectedId}
             onImport={() => setView("import")}
+            onInstall={handleInstall}
+            onDelete={handleDelete}
           />
         ) : view === "import" ? (
           <ImportSources
@@ -209,7 +288,7 @@ function Sidebar({
           <Palette size={22} />
         </div>
         <div>
-          <strong>CodeDrobe</strong>
+          <strong>LumaDrobe</strong>
           <span>THEME ATELIER</span>
         </div>
       </div>
@@ -259,14 +338,23 @@ function Sidebar({
 function Wardrobe({
   skins,
   selected,
+  installedKeys,
+  working,
   onSelect,
   onImport,
+  onInstall,
+  onDelete,
 }: {
   skins: CatalogSkin[];
   selected: CatalogSkin;
+  installedKeys: Set<string>;
+  working: string | null;
   onSelect: (id: string) => void;
   onImport: () => void;
+  onInstall: (skin: CatalogSkin) => Promise<void>;
+  onDelete: (skin: CatalogSkin) => Promise<void>;
 }) {
+  const selectedKey = `${selected.sourceId}:${selected.manifest.id}`;
   return (
     <div className="wardrobe-layout">
       <section className="wardrobe-content">
@@ -293,13 +381,22 @@ function Wardrobe({
             <ThemeCard
               key={`${skin.sourceId}:${skin.manifest.id}`}
               skin={skin}
-              selected={skin.manifest.id === selected.manifest.id}
-              onSelect={() => onSelect(skin.manifest.id)}
+              selected={`${skin.sourceId}:${skin.manifest.id}` === selectedKey}
+              installed={installedKeys.has(
+                `${skin.sourceId}:${skin.manifest.id}`,
+              )}
+              onSelect={() => onSelect(`${skin.sourceId}:${skin.manifest.id}`)}
             />
           ))}
         </div>
       </section>
-      <FittingRoom skin={selected} />
+      <FittingRoom
+        skin={selected}
+        installed={installedKeys.has(selectedKey)}
+        working={working}
+        onInstall={onInstall}
+        onDelete={onDelete}
+      />
     </div>
   );
 }
@@ -307,10 +404,12 @@ function Wardrobe({
 function ThemeCard({
   skin,
   selected,
+  installed,
   onSelect,
 }: {
   skin: CatalogSkin;
   selected: boolean;
+  installed: boolean;
   onSelect: () => void;
 }) {
   const colors = Object.values(skin.manifest.colors ?? {}).slice(0, 3);
@@ -325,8 +424,10 @@ function ThemeCard({
           backgroundImage: `url(${skin.previewUrl ?? skin.backgroundUrl})`,
         }}
       >
-        <span className="imported-badge">已导入</span>
-        {selected && <span className="using-badge">使用中</span>}
+        <span className={installed ? "imported-badge" : "remote-badge"}>
+          {installed ? "已安装" : "云端"}
+        </span>
+        {selected && <span className="using-badge">已选择</span>}
         <div className="theme-title">
           <strong>{skin.manifest.name}</strong>
           <span>v{skin.manifest.version}</span>
@@ -344,13 +445,29 @@ function ThemeCard({
   );
 }
 
-function FittingRoom({ skin }: { skin: CatalogSkin }) {
+function FittingRoom({
+  skin,
+  installed,
+  working,
+  onInstall,
+  onDelete,
+}: {
+  skin: CatalogSkin;
+  installed: boolean;
+  working: string | null;
+  onInstall: (skin: CatalogSkin) => Promise<void>;
+  onDelete: (skin: CatalogSkin) => Promise<void>;
+}) {
   const colors = Object.values(skin.manifest.colors ?? {}).slice(0, 3);
+  const key = `${skin.sourceId}:${skin.manifest.id}`;
+  const installing = working === `install:${key}`;
+  const deleting = working === `delete:${key}`;
+  const showcase = skin.sourceId === "builtin-showcase";
   return (
     <aside className="fitting-room">
       <header>
         <h2>试衣镜</h2>
-        <span>已选主题</span>
+        <span>{installed ? "本地已安装" : "在线主题"}</span>
       </header>
       <div
         className="poster"
@@ -359,7 +476,7 @@ function FittingRoom({ skin }: { skin: CatalogSkin }) {
         }}
       >
         <div>
-          <small>IMPORTED EDITION</small>
+          <small>{installed ? "LOCAL EDITION" : "SOURCE PREVIEW"}</small>
           <strong>{skin.manifest.name}</strong>
           <p>{skin.manifest.description}</p>
         </div>
@@ -376,19 +493,45 @@ function FittingRoom({ skin }: { skin: CatalogSkin }) {
         <small>v{skin.manifest.version}</small>
       </div>
       <div className="fitting-actions">
-        <button className="apply-button">
-          <Play size={20} />
+        <button
+          className="apply-button"
+          disabled={installed || showcase || installing}
+          onClick={() => void onInstall(skin)}
+        >
+          {installing ? (
+            <LoaderCircle className="spin" size={20} />
+          ) : installed ? (
+            <Check size={20} />
+          ) : (
+            <Download size={20} />
+          )}
           <span>
-            <strong>应用并启动</strong>
-            <small>需等待 Codex 重启</small>
+            <strong>
+              {installing
+                ? "正在安全导入"
+                : installed
+                  ? "已安装到本地"
+                  : showcase
+                    ? "订阅后安装"
+                    : "下载并安装"}
+            </strong>
+            <small>{installed ? "第三轮接入启动" : "校验图片与 CSS"}</small>
           </span>
         </button>
-        <button>
+        <button disabled>
           <Upload size={18} />
           <span>导出</span>
         </button>
-        <button className="delete-button">
-          <Trash2 size={18} />
+        <button
+          className="delete-button"
+          disabled={!installed || deleting}
+          onClick={() => void onDelete(skin)}
+        >
+          {deleting ? (
+            <LoaderCircle className="spin" size={18} />
+          ) : (
+            <Trash2 size={18} />
+          )}
           <span>删除</span>
         </button>
       </div>

@@ -14,6 +14,10 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("找不到订阅源：{0}")]
     SourceNotFound(String),
+    #[error("找不到主题：{0}")]
+    SkinNotFound(String),
+    #[error("主题资源不安全：{0}")]
+    UnsafeAsset(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

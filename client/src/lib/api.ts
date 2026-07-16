@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CatalogSkin, SourceRecord } from "../types";
+import type { CatalogSkin, InstalledSkin, SourceRecord } from "../types";
 
 const demoSource: SourceRecord = {
   id: "dream-skin-demo",
@@ -7,8 +7,8 @@ const demoSource: SourceRecord = {
   owner: "yuebanddd",
   repository: "Codex-Dream-Skin",
   refName: "release",
-  name: "Codex Dream Skin 官方示例源",
-  author: "Codex Dream Skin contributors",
+  name: "LumaDrobe 官方示例源",
+  author: "LumaDrobe contributors",
   description: "启动桌面端后即可刷新 GitHub 仓库中的真实皮肤目录。",
   refreshedAt: new Date().toISOString(),
   skins: [],
@@ -43,4 +43,26 @@ export async function removeSource(sourceId: string): Promise<void> {
 export async function listCatalogSkins(): Promise<CatalogSkin[]> {
   if (!inTauri()) return [];
   return invoke<CatalogSkin[]>("list_catalog_skins");
+}
+
+export async function listInstalledSkins(): Promise<InstalledSkin[]> {
+  if (!inTauri()) return [];
+  return invoke<InstalledSkin[]>("list_installed_skins");
+}
+
+export async function installSkin(
+  sourceId: string,
+  skinId: string,
+): Promise<InstalledSkin> {
+  if (!inTauri()) {
+    throw new Error("Web 预览模式不能写入本地主题库，请使用 Tauri 桌面端。");
+  }
+  return invoke<InstalledSkin>("install_skin", { sourceId, skinId });
+}
+
+export async function deleteInstalledSkin(
+  sourceId: string,
+  skinId: string,
+): Promise<void> {
+  return invoke("delete_installed_skin", { sourceId, skinId });
 }
