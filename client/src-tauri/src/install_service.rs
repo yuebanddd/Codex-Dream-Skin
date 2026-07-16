@@ -232,14 +232,12 @@ fn validate_css(css: &str) -> AppResult<()> {
         "file:",
         "javascript:",
         "-moz-binding",
+        "//",
     ];
     if let Some(token) = blocked.iter().find(|token| normalized.contains(**token)) {
         return Err(AppError::UnsafeAsset(format!(
             "CSS 包含被禁止的内容：{token}"
         )));
-    }
-    if contains_scheme_relative_url(&normalized) {
-        return Err(AppError::UnsafeAsset("CSS 包含被禁止的协议相对 URL".into()));
     }
     Ok(())
 }
@@ -279,25 +277,6 @@ fn strip_css_comments(css: &str) -> String {
         output.push(character);
     }
     output
-}
-
-fn contains_scheme_relative_url(css: &str) -> bool {
-    let mut rest = css;
-    while let Some(start) = rest.find("url(") {
-        let mut value = rest[start + 4..].trim_start_matches(char::is_whitespace);
-        if let Some(quote) = value
-            .chars()
-            .next()
-            .filter(|value| matches!(*value, '\'' | '"'))
-        {
-            value = value[quote.len_utf8()..].trim_start_matches(char::is_whitespace);
-        }
-        if value.starts_with("//") {
-            return true;
-        }
-        rest = &rest[start + 4..];
-    }
-    false
 }
 
 fn normalize_css_escapes(css: &str) -> String {
@@ -405,6 +384,10 @@ mod tests {
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(  \t\n //tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(  \"//tracker.example/pixel\"); }").is_err());
+        assert!(
+            validate_css(r#"a { background-image: image-set("//tracker.example/pixel" 1x); }"#)
+                .is_err()
+        );
         assert!(
             validate_css("a { background: url(/* hidden */ //tracker.example/pixel); }").is_err()
         );
