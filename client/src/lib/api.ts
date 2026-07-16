@@ -25,7 +25,9 @@ export async function listSources(): Promise<SourceRecord[]> {
 
 export async function addSource(repositoryUrl: string): Promise<SourceRecord> {
   if (!inTauri()) {
-    throw new Error("Web 预览模式无法访问本机 Rust 服务，请使用 Tauri 桌面端。 ");
+    throw new Error(
+      "Web 预览模式无法访问本机 Rust 服务，请使用 Tauri 桌面端。 ",
+    );
   }
   return invoke<SourceRecord>("add_source", { repositoryUrl });
 }
