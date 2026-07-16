@@ -30,9 +30,9 @@ impl InstalledStore {
     }
 
     pub fn has_storage_collision(&self, source_id: &str, skin_id: &str) -> bool {
-        self.skins.iter().any(|skin| {
-            storage_keys_collide(&skin.source_id, &skin.skin_id, source_id, skin_id)
-        })
+        self.skins
+            .iter()
+            .any(|skin| storage_keys_collide(&skin.source_id, &skin.skin_id, source_id, skin_id))
     }
 
     pub fn upsert(&mut self, skin: InstalledSkin) -> AppResult<()> {
