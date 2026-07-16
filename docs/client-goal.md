@@ -48,11 +48,13 @@ LumaDrobe 是一个去中心化的 Codex 主题衣橱：任何人都可以用公
 
 ### M3 · Rust 注入引擎
 
-- macOS / Windows Codex 发现与身份验证
-- Rust CDP WebSocket 客户端
-- 启动、热应用、暂停、恢复
-- Renderer 重载和路由变化自动重注入
-- 迁移现有脚本中的进程身份、端口和配置安全保护
+- [x] macOS / Windows Codex 发现与身份验证
+- [x] Rust CDP WebSocket 客户端
+- [x] 启动、热应用和恢复原生
+- [x] Renderer 重载和路由变化自动重注入
+- [x] 迁移现有脚本中的进程身份、端口和会话安全保护
+- [ ] 不退出 Codex 的临时暂停入口
+- [ ] macOS / Windows 多版本实机兼容性矩阵
 
 ### M4 · 发布质量
 

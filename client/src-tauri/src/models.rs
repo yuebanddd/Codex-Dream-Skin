@@ -80,6 +80,34 @@ pub struct InstalledSkin {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus {
+    pub phase: String,
+    #[serde(default)]
+    pub active_source_id: Option<String>,
+    #[serde(default)]
+    pub active_skin_id: Option<String>,
+    #[serde(default)]
+    pub active_version: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub message: String,
+}
+
+impl RuntimeStatus {
+    pub fn stopped(message: impl Into<String>) -> Self {
+        Self {
+            phase: "stopped".into(),
+            active_source_id: None,
+            active_skin_id: None,
+            active_version: None,
+            port: None,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceRecord {
     pub id: String,
     pub repository_url: String,

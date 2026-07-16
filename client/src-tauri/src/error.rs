@@ -18,6 +18,8 @@ pub enum AppError {
     SkinNotFound(String),
     #[error("主题资源不安全：{0}")]
     UnsafeAsset(String),
+    #[error("皮肤引擎无法继续：{0}")]
+    Runtime(String),
 }
 
 pub type AppResult<T> = Result<T, AppError>;

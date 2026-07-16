@@ -1,14 +1,19 @@
 mod atomic_file;
+mod cdp;
+mod codex_process;
 mod commands;
 mod error;
 mod github_source;
 mod install_service;
 mod installed_store;
 mod models;
+mod renderer_payload;
+mod runtime_service;
 mod source_store;
 
 use installed_store::InstalledStore;
 use reqwest::Client;
+use runtime_service::RuntimeManager;
 use source_store::SourceStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +24,7 @@ pub struct AppState {
     http: Client,
     sources: Arc<Mutex<SourceStore>>,
     installed: Arc<Mutex<InstalledStore>>,
+    runtime: Arc<RuntimeManager>,
     theme_operation: Arc<Mutex<()>>,
     data_dir: PathBuf,
 }
@@ -29,16 +35,25 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let source_store = SourceStore::load(data_dir.join("sources.json"))?;
-            let installed_store = InstalledStore::load(data_dir.join("installed-skins.json"))?;
+            let installed_store = Arc::new(Mutex::new(InstalledStore::load(
+                data_dir.join("installed-skins.json"),
+            )?));
             let http = Client::builder()
-                .user_agent("LumaDrobe/0.2.0")
+                .user_agent("LumaDrobe/0.3.0")
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::limited(3))
                 .build()?;
+            let runtime = RuntimeManager::new(data_dir.join("runtime.json"))?;
+            let recovery_runtime = Arc::clone(&runtime);
+            let recovery_installed = Arc::clone(&installed_store);
+            tauri::async_runtime::spawn(async move {
+                recovery_runtime.recover(recovery_installed).await;
+            });
             app.manage(AppState {
                 http,
                 sources: Arc::new(Mutex::new(source_store)),
-                installed: Arc::new(Mutex::new(installed_store)),
+                installed: installed_store,
+                runtime,
                 theme_operation: Arc::new(Mutex::new(())),
                 data_dir,
             });
@@ -53,6 +68,9 @@ pub fn run() {
             commands::list_installed_skins,
             commands::install_skin,
             commands::delete_installed_skin,
+            commands::runtime_status,
+            commands::apply_and_launch,
+            commands::restore_native,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LumaDrobe");

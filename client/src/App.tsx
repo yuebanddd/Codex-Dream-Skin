@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Monitor,
   Palette,
+  PlayCircle,
   RefreshCcw,
   RotateCcw,
   Sparkles,
@@ -17,14 +18,22 @@ import {
 } from "lucide-react";
 import {
   addSource,
+  applyAndLaunch,
   deleteInstalledSkin,
   installSkin,
+  getRuntimeStatus,
   listInstalledSkins,
   listSources,
   refreshSource,
   removeSource,
+  restoreNative,
 } from "./lib/api";
-import type { CatalogSkin, InstalledSkin, SourceRecord } from "./types";
+import type {
+  CatalogSkin,
+  InstalledSkin,
+  RuntimeStatus,
+  SourceRecord,
+} from "./types";
 
 type View = "wardrobe" | "import" | "restore";
 type InstallationStatus = "remote" | "installed" | "update";
@@ -97,16 +106,22 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [runtime, setRuntime] = useState<RuntimeStatus>({
+    phase: "stopped",
+    message: "正在连接 Rust Core",
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextSources, nextInstalled] = await Promise.all([
+      const [nextSources, nextInstalled, nextRuntime] = await Promise.all([
         listSources(),
         listInstalledSkins(),
+        getRuntimeStatus(),
       ]);
       setSources(nextSources);
       setInstalled(nextInstalled);
+      setRuntime(nextRuntime);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -117,6 +132,13 @@ function App() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void getRuntimeStatus().then(setRuntime).catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const remoteSkins = useMemo(
     () => sources.flatMap((source) => source.skins),
@@ -250,9 +272,49 @@ function App() {
     }
   }
 
+  async function handleApply(skin: CatalogSkin) {
+    const key = skinKey(skin);
+    setWorking(`apply:${key}`);
+    setError("");
+    setRuntime((current) => ({
+      ...current,
+      phase: "starting",
+      activeSourceId: skin.sourceId,
+      activeSkinId: skin.manifest.id,
+      activeVersion: skin.manifest.version,
+      message: "正在启动 Codex 与回环 CDP",
+    }));
+    try {
+      setRuntime(await applyAndLaunch(skin.sourceId, skin.manifest.id));
+    } catch (reason) {
+      setError(String(reason));
+      setRuntime(await getRuntimeStatus());
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function handleRestore() {
+    setWorking("restore");
+    setError("");
+    try {
+      setRuntime(await restoreNative());
+    } catch (reason) {
+      setError(String(reason));
+      setRuntime(await getRuntimeStatus());
+    } finally {
+      setWorking(null);
+    }
+  }
+
   return (
     <div className="atelier-shell">
-      <Sidebar view={view} count={installed.length} onNavigate={setView} />
+      <Sidebar
+        view={view}
+        count={installed.length}
+        runtime={runtime}
+        onNavigate={setView}
+      />
       <main className="atelier-main">
         {error && <div className="error-toast">{error}</div>}
         {loading ? (
@@ -266,9 +328,11 @@ function App() {
             selected={selected}
             installedVersions={installedVersions}
             working={working}
+            runtime={runtime}
             onSelect={setSelectedId}
             onImport={() => setView("import")}
             onInstall={handleInstall}
+            onApply={handleApply}
             onDelete={handleDelete}
           />
         ) : view === "import" ? (
@@ -280,7 +344,11 @@ function App() {
             onRemove={handleRemove}
           />
         ) : (
-          <RestoreView />
+          <RestoreView
+            runtime={runtime}
+            working={working === "restore"}
+            onRestore={handleRestore}
+          />
         )}
       </main>
     </div>
@@ -290,10 +358,12 @@ function App() {
 function Sidebar({
   view,
   count,
+  runtime,
   onNavigate,
 }: {
   view: View;
   count: number;
+  runtime: RuntimeStatus;
   onNavigate: (view: View) => void;
 }) {
   return (
@@ -343,11 +413,21 @@ function Sidebar({
       <p className="safety-copy">
         主题只改变外观，不修改 Codex 安装包和你的对话数据。
       </p>
-      <div className="runtime-card">
+      <div className={`runtime-card ${runtime.phase}`}>
         <i />
         <div>
-          <strong>皮肤引擎待接入</strong>
-          <span>Rust Core · CDP</span>
+          <strong>
+            {runtime.phase === "running"
+              ? "皮肤引擎正在运行"
+              : runtime.phase === "error"
+                ? "皮肤引擎需要处理"
+                : runtime.phase === "starting" || runtime.phase === "checking"
+                  ? "正在验证皮肤引擎"
+                  : "皮肤引擎已就绪"}
+          </strong>
+          <span>
+            Rust Core · {runtime.port ? `CDP ${runtime.port}` : "CDP loopback"}
+          </span>
         </div>
         <Monitor size={17} />
       </div>
@@ -360,21 +440,28 @@ function Wardrobe({
   selected,
   installedVersions,
   working,
+  runtime,
   onSelect,
   onImport,
   onInstall,
+  onApply,
   onDelete,
 }: {
   skins: CatalogSkin[];
   selected: CatalogSkin;
   installedVersions: Map<string, string>;
   working: string | null;
+  runtime: RuntimeStatus;
   onSelect: (id: string) => void;
   onImport: () => void;
   onInstall: (skin: CatalogSkin) => Promise<void>;
+  onApply: (skin: CatalogSkin) => Promise<void>;
   onDelete: (skin: CatalogSkin) => Promise<void>;
 }) {
   const selectedKey = `${selected.sourceId}:${selected.manifest.id}`;
+  const activeKey = runtime.activeSourceId && runtime.activeSkinId
+    ? `${runtime.activeSourceId}:${runtime.activeSkinId}`
+    : undefined;
   const getStatus = (skin: CatalogSkin): InstallationStatus => {
     const installedVersion = installedVersions.get(
       `${skin.sourceId}:${skin.manifest.id}`,
@@ -410,6 +497,7 @@ function Wardrobe({
               skin={skin}
               selected={`${skin.sourceId}:${skin.manifest.id}` === selectedKey}
               status={getStatus(skin)}
+              active={activeKey === `${skin.sourceId}:${skin.manifest.id}` && runtime.phase === "running"}
               onSelect={() => onSelect(`${skin.sourceId}:${skin.manifest.id}`)}
             />
           ))}
@@ -419,7 +507,9 @@ function Wardrobe({
         skin={selected}
         status={getStatus(selected)}
         working={working}
+        active={activeKey === selectedKey && runtime.phase === "running"}
         onInstall={onInstall}
+        onApply={onApply}
         onDelete={onDelete}
       />
     </div>
@@ -430,11 +520,13 @@ function ThemeCard({
   skin,
   selected,
   status,
+  active,
   onSelect,
 }: {
   skin: CatalogSkin;
   selected: boolean;
   status: InstallationStatus;
+  active: boolean;
   onSelect: () => void;
 }) {
   const colors = Object.values(skin.manifest.colors ?? {}).slice(0, 3);
@@ -458,7 +550,11 @@ function ThemeCard({
               ? "可更新"
               : "云端"}
         </span>
-        {selected && <span className="using-badge">已选择</span>}
+        {(selected || active) && (
+          <span className={`using-badge ${active ? "active" : ""}`}>
+            {active ? "使用中" : "已选择"}
+          </span>
+        )}
         <div className="theme-title">
           <strong>{skin.manifest.name}</strong>
           <span>v{skin.manifest.version}</span>
@@ -480,21 +576,29 @@ function FittingRoom({
   skin,
   status,
   working,
+  active,
   onInstall,
+  onApply,
   onDelete,
 }: {
   skin: CatalogSkin;
   status: InstallationStatus;
   working: string | null;
+  active: boolean;
   onInstall: (skin: CatalogSkin) => Promise<void>;
+  onApply: (skin: CatalogSkin) => Promise<void>;
   onDelete: (skin: CatalogSkin) => Promise<void>;
 }) {
   const colors = Object.values(skin.manifest.colors ?? {}).slice(0, 3);
   const key = `${skin.sourceId}:${skin.manifest.id}`;
   const installing = working === `install:${key}`;
   const deleting = working === `delete:${key}`;
+  const applying = working === `apply:${key}`;
   const themeOperationActive =
-    working?.startsWith("install:") || working?.startsWith("delete:");
+    working?.startsWith("install:") ||
+    working?.startsWith("delete:") ||
+    working?.startsWith("apply:") ||
+    working === "restore";
   const showcase = skin.sourceId === "builtin-showcase";
   const installed = status === "installed";
   const hasLocalVersion = status !== "remote";
@@ -507,7 +611,9 @@ function FittingRoom({
           {updateAvailable
             ? "发现新版本"
             : installed
-              ? "本地已安装"
+              ? active
+                ? "当前使用中"
+                : "本地已安装"
               : "在线主题"}
         </span>
       </header>
@@ -537,13 +643,15 @@ function FittingRoom({
       <div className="fitting-actions">
         <button
           className="apply-button"
-          disabled={installed || showcase || themeOperationActive}
-          onClick={() => void onInstall(skin)}
+          disabled={showcase || themeOperationActive}
+          onClick={() =>
+            void (installed ? onApply(skin) : onInstall(skin))
+          }
         >
-          {installing ? (
+          {installing || applying ? (
             <LoaderCircle className="spin" size={20} />
           ) : installed ? (
-            <Check size={20} />
+            active ? <Check size={20} /> : <PlayCircle size={20} />
           ) : (
             <Download size={20} />
           )}
@@ -551,8 +659,12 @@ function FittingRoom({
             <strong>
               {installing
                 ? "正在安全导入"
+                : applying
+                  ? "正在应用并启动"
                 : installed
-                  ? "已安装到本地"
+                  ? active
+                    ? "重新应用主题"
+                    : "应用并启动"
                   : updateAvailable
                     ? `更新到 v${skin.manifest.version}`
                     : showcase
@@ -561,7 +673,9 @@ function FittingRoom({
             </strong>
             <small>
               {installed
-                ? "第三轮接入启动"
+                ? active
+                  ? "热重载当前主题"
+                  : "Rust Core · loopback CDP"
                 : updateAvailable
                   ? "安全替换本地版本"
                   : "校验图片与 CSS"}
@@ -574,7 +688,7 @@ function FittingRoom({
         </button>
         <button
           className="delete-button"
-          disabled={!hasLocalVersion || themeOperationActive}
+          disabled={!hasLocalVersion || active || themeOperationActive}
           onClick={() => void onDelete(skin)}
         >
           {deleting ? (
@@ -651,7 +765,16 @@ function ImportSources({
   );
 }
 
-function RestoreView() {
+function RestoreView({
+  runtime,
+  working,
+  onRestore,
+}: {
+  runtime: RuntimeStatus;
+  working: boolean;
+  onRestore: () => Promise<void>;
+}) {
+  const canRestore = runtime.phase !== "stopped";
   return (
     <div className="restore-page">
       <div className="restore-icon">
@@ -662,13 +785,16 @@ function RestoreView() {
       <p>
         停止皮肤引擎、移除当前注入，并按原子备份恢复外观设置。项目与对话不会受到影响。
       </p>
-      <button>
-        <RotateCcw />
-        恢复原生并重启
+      <button
+        disabled={!canRestore || working}
+        onClick={() => void onRestore()}
+      >
+        {working ? <LoaderCircle className="spin" /> : <RotateCcw />}
+        {working ? "正在安全恢复" : "恢复原生并重启"}
       </button>
       <div className="restore-note">
-        <Check />
-        现有 macOS / Windows 恢复脚本将在下一阶段迁移到 Rust Core。
+        {runtime.phase === "error" ? <Monitor /> : <Check />}
+        {runtime.message}
       </div>
     </div>
   );

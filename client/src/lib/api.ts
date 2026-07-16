@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CatalogSkin, InstalledSkin, SourceRecord } from "../types";
+import type {
+  CatalogSkin,
+  InstalledSkin,
+  RuntimeStatus,
+  SourceRecord,
+} from "../types";
 
 const demoSource: SourceRecord = {
   id: "dream-skin-demo",
@@ -65,4 +70,28 @@ export async function deleteInstalledSkin(
   skinId: string,
 ): Promise<void> {
   return invoke("delete_installed_skin", { sourceId, skinId });
+}
+
+export async function getRuntimeStatus(): Promise<RuntimeStatus> {
+  if (!inTauri()) {
+    return { phase: "stopped", message: "Web 预览模式 · Rust Core 未连接" };
+  }
+  return invoke<RuntimeStatus>("runtime_status");
+}
+
+export async function applyAndLaunch(
+  sourceId: string,
+  skinId: string,
+): Promise<RuntimeStatus> {
+  if (!inTauri()) {
+    throw new Error("Web 预览模式不能启动 Codex，请使用 Tauri 桌面端。");
+  }
+  return invoke<RuntimeStatus>("apply_and_launch", { sourceId, skinId });
+}
+
+export async function restoreNative(): Promise<RuntimeStatus> {
+  if (!inTauri()) {
+    throw new Error("Web 预览模式不能恢复 Codex，请使用 Tauri 桌面端。");
+  }
+  return invoke<RuntimeStatus>("restore_native");
 }

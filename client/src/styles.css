@@ -185,6 +185,25 @@ input {
   background: #d6a85f;
   box-shadow: 0 0 9px #d6a85f;
 }
+.runtime-card.running > i {
+  background: #57c784;
+  box-shadow: 0 0 10px #57c784;
+}
+.runtime-card.error > i {
+  background: #d65c68;
+  box-shadow: 0 0 10px #d65c68;
+}
+.runtime-card.starting > i,
+.runtime-card.checking > i,
+.runtime-card.stopping > i {
+  animation: runtime-pulse 1.2s ease-in-out infinite;
+}
+@keyframes runtime-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
 .runtime-card strong,
 .runtime-card span {
   display: block;
@@ -383,6 +402,10 @@ input {
   color: white;
   font-size: 8px;
   backdrop-filter: blur(8px);
+}
+.using-badge.active {
+  background: rgba(39, 126, 75, 0.9);
+  box-shadow: 0 0 0 1px rgba(111, 224, 151, 0.22);
 }
 .imported-badge {
   left: 10px;
@@ -623,6 +646,10 @@ input {
   color: #f4e6d6;
   font-size: 10px;
   cursor: pointer;
+}
+.restore-page > button:disabled {
+  cursor: default;
+  opacity: 0.42;
 }
 .source-page form button svg {
   width: 15px;
