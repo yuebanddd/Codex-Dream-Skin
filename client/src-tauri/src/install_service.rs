@@ -215,6 +215,7 @@ fn write_asset(
 
 fn validate_component(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
+        || matches!(value, "." | "..")
         || value.len() > 80
         || !value
             .bytes()
@@ -248,6 +249,8 @@ mod tests {
     #[test]
     fn rejects_unsafe_storage_components() {
         assert!(validate_component("pink-dream", "主题 ID").is_ok());
+        assert!(validate_component(".", "主题 ID").is_err());
+        assert!(validate_component("..", "主题 ID").is_err());
         assert!(validate_component("../escape", "主题 ID").is_err());
     }
 }

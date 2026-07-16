@@ -27,6 +27,7 @@ import {
 import type { CatalogSkin, InstalledSkin, SourceRecord } from "./types";
 
 type View = "wardrobe" | "import" | "restore";
+type InstallationStatus = "remote" | "installed" | "update";
 
 const featuredSkins: CatalogSkin[] = [
   {
@@ -142,8 +143,14 @@ function App() {
   const skinKey = (skin: CatalogSkin) => `${skin.sourceId}:${skin.manifest.id}`;
   const selected =
     skins.find((skin) => skinKey(skin) === selectedId) ?? skins[0];
-  const installedKeys = useMemo(
-    () => new Set(installed.map((skin) => `${skin.sourceId}:${skin.skinId}`)),
+  const installedVersions = useMemo(
+    () =>
+      new Map(
+        installed.map((skin) => [
+          `${skin.sourceId}:${skin.skinId}`,
+          skin.version,
+        ]),
+      ),
     [installed],
   );
 
@@ -244,7 +251,7 @@ function App() {
           <Wardrobe
             skins={skins}
             selected={selected}
-            installedKeys={installedKeys}
+            installedVersions={installedVersions}
             working={working}
             onSelect={setSelectedId}
             onImport={() => setView("import")}
@@ -338,7 +345,7 @@ function Sidebar({
 function Wardrobe({
   skins,
   selected,
-  installedKeys,
+  installedVersions,
   working,
   onSelect,
   onImport,
@@ -347,7 +354,7 @@ function Wardrobe({
 }: {
   skins: CatalogSkin[];
   selected: CatalogSkin;
-  installedKeys: Set<string>;
+  installedVersions: Map<string, string>;
   working: string | null;
   onSelect: (id: string) => void;
   onImport: () => void;
@@ -355,6 +362,13 @@ function Wardrobe({
   onDelete: (skin: CatalogSkin) => Promise<void>;
 }) {
   const selectedKey = `${selected.sourceId}:${selected.manifest.id}`;
+  const getStatus = (skin: CatalogSkin): InstallationStatus => {
+    const installedVersion = installedVersions.get(
+      `${skin.sourceId}:${skin.manifest.id}`,
+    );
+    if (!installedVersion) return "remote";
+    return installedVersion === skin.manifest.version ? "installed" : "update";
+  };
   return (
     <div className="wardrobe-layout">
       <section className="wardrobe-content">
@@ -382,9 +396,7 @@ function Wardrobe({
               key={`${skin.sourceId}:${skin.manifest.id}`}
               skin={skin}
               selected={`${skin.sourceId}:${skin.manifest.id}` === selectedKey}
-              installed={installedKeys.has(
-                `${skin.sourceId}:${skin.manifest.id}`,
-              )}
+              status={getStatus(skin)}
               onSelect={() => onSelect(`${skin.sourceId}:${skin.manifest.id}`)}
             />
           ))}
@@ -392,7 +404,7 @@ function Wardrobe({
       </section>
       <FittingRoom
         skin={selected}
-        installed={installedKeys.has(selectedKey)}
+        status={getStatus(selected)}
         working={working}
         onInstall={onInstall}
         onDelete={onDelete}
@@ -404,12 +416,12 @@ function Wardrobe({
 function ThemeCard({
   skin,
   selected,
-  installed,
+  status,
   onSelect,
 }: {
   skin: CatalogSkin;
   selected: boolean;
-  installed: boolean;
+  status: InstallationStatus;
   onSelect: () => void;
 }) {
   const colors = Object.values(skin.manifest.colors ?? {}).slice(0, 3);
@@ -424,8 +436,14 @@ function ThemeCard({
           backgroundImage: `url(${skin.previewUrl ?? skin.backgroundUrl})`,
         }}
       >
-        <span className={installed ? "imported-badge" : "remote-badge"}>
-          {installed ? "已安装" : "云端"}
+        <span
+          className={status === "remote" ? "remote-badge" : "imported-badge"}
+        >
+          {status === "installed"
+            ? "已安装"
+            : status === "update"
+              ? "可更新"
+              : "云端"}
         </span>
         {selected && <span className="using-badge">已选择</span>}
         <div className="theme-title">
@@ -447,13 +465,13 @@ function ThemeCard({
 
 function FittingRoom({
   skin,
-  installed,
+  status,
   working,
   onInstall,
   onDelete,
 }: {
   skin: CatalogSkin;
-  installed: boolean;
+  status: InstallationStatus;
   working: string | null;
   onInstall: (skin: CatalogSkin) => Promise<void>;
   onDelete: (skin: CatalogSkin) => Promise<void>;
@@ -463,11 +481,20 @@ function FittingRoom({
   const installing = working === `install:${key}`;
   const deleting = working === `delete:${key}`;
   const showcase = skin.sourceId === "builtin-showcase";
+  const installed = status === "installed";
+  const hasLocalVersion = status !== "remote";
+  const updateAvailable = status === "update";
   return (
     <aside className="fitting-room">
       <header>
         <h2>试衣镜</h2>
-        <span>{installed ? "本地已安装" : "在线主题"}</span>
+        <span>
+          {updateAvailable
+            ? "发现新版本"
+            : installed
+              ? "本地已安装"
+              : "在线主题"}
+        </span>
       </header>
       <div
         className="poster"
@@ -476,7 +503,7 @@ function FittingRoom({
         }}
       >
         <div>
-          <small>{installed ? "LOCAL EDITION" : "SOURCE PREVIEW"}</small>
+          <small>{hasLocalVersion ? "LOCAL EDITION" : "SOURCE PREVIEW"}</small>
           <strong>{skin.manifest.name}</strong>
           <p>{skin.manifest.description}</p>
         </div>
@@ -511,11 +538,19 @@ function FittingRoom({
                 ? "正在安全导入"
                 : installed
                   ? "已安装到本地"
-                  : showcase
-                    ? "订阅后安装"
-                    : "下载并安装"}
+                  : updateAvailable
+                    ? `更新到 v${skin.manifest.version}`
+                    : showcase
+                      ? "订阅后安装"
+                      : "下载并安装"}
             </strong>
-            <small>{installed ? "第三轮接入启动" : "校验图片与 CSS"}</small>
+            <small>
+              {installed
+                ? "第三轮接入启动"
+                : updateAvailable
+                  ? "安全替换本地版本"
+                  : "校验图片与 CSS"}
+            </small>
           </span>
         </button>
         <button disabled>
@@ -524,7 +559,7 @@ function FittingRoom({
         </button>
         <button
           className="delete-button"
-          disabled={!installed || deleting}
+          disabled={!hasLocalVersion || deleting}
           onClick={() => void onDelete(skin)}
         >
           {deleting ? (

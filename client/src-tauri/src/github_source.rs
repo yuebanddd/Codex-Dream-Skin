@@ -185,6 +185,7 @@ fn validate_skin_manifest(expected_id: &str, manifest: &SkinManifest) -> AppResu
 
 fn validate_id(value: &str) -> AppResult<()> {
     if value.is_empty()
+        || matches!(value, "." | "..")
         || value.len() > 80
         || !value
             .bytes()
@@ -259,5 +260,11 @@ mod tests {
     #[test]
     fn rejects_parent_resource_paths() {
         assert!(validate_repo_path("../secret.png").is_err());
+    }
+
+    #[test]
+    fn rejects_dot_only_manifest_ids() {
+        assert!(validate_id(".").is_err());
+        assert!(validate_id("..").is_err());
     }
 }
