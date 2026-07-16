@@ -44,9 +44,12 @@ pub fn run() {
                 .redirect(reqwest::redirect::Policy::limited(3))
                 .build()?;
             let runtime = RuntimeManager::new(data_dir.join("runtime.json"))?;
+            let theme_operation = Arc::new(Mutex::new(()));
             let recovery_runtime = Arc::clone(&runtime);
             let recovery_installed = Arc::clone(&installed_store);
+            let recovery_operation = Arc::clone(&theme_operation);
             tauri::async_runtime::spawn(async move {
+                let _operation = recovery_operation.lock().await;
                 recovery_runtime.recover(recovery_installed).await;
             });
             app.manage(AppState {
@@ -54,7 +57,7 @@ pub fn run() {
                 sources: Arc::new(Mutex::new(source_store)),
                 installed: installed_store,
                 runtime,
-                theme_operation: Arc::new(Mutex::new(())),
+                theme_operation,
                 data_dir,
             });
             Ok(())

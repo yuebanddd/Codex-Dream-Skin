@@ -81,6 +81,9 @@ pub async fn install_skin(
     state: State<'_, AppState>,
 ) -> Result<InstalledSkin, String> {
     let _operation = state.theme_operation.lock().await;
+    if state.runtime.is_active_theme(&source_id, &skin_id).await {
+        return Err("该主题正在运行，请先恢复原生外观再更新或重新安装".into());
+    }
     let previous = {
         let installed = state.installed.lock().await;
         if installed.has_storage_collision(&source_id, &skin_id) {

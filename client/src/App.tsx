@@ -603,6 +603,7 @@ function FittingRoom({
   const installed = status === "installed";
   const hasLocalVersion = status !== "remote";
   const updateAvailable = status === "update";
+  const activeUpdate = active && updateAvailable;
   return (
     <aside className="fitting-room">
       <header>
@@ -643,13 +644,15 @@ function FittingRoom({
       <div className="fitting-actions">
         <button
           className="apply-button"
-          disabled={showcase || themeOperationActive}
+          disabled={showcase || activeUpdate || themeOperationActive}
           onClick={() =>
             void (installed ? onApply(skin) : onInstall(skin))
           }
         >
           {installing || applying ? (
             <LoaderCircle className="spin" size={20} />
+          ) : activeUpdate ? (
+            <RotateCcw size={20} />
           ) : installed ? (
             active ? <Check size={20} /> : <PlayCircle size={20} />
           ) : (
@@ -661,6 +664,8 @@ function FittingRoom({
                 ? "正在安全导入"
                 : applying
                   ? "正在应用并启动"
+                  : activeUpdate
+                    ? "先恢复再更新"
                 : installed
                   ? active
                     ? "重新应用主题"
@@ -672,7 +677,9 @@ function FittingRoom({
                       : "下载并安装"}
             </strong>
             <small>
-              {installed
+              {activeUpdate
+                ? "保护当前运行版本"
+                : installed
                 ? active
                   ? "热重载当前主题"
                   : "Rust Core · loopback CDP"

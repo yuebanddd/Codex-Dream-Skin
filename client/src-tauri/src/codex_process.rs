@@ -327,24 +327,47 @@ fn macos_codex_pids(executable: &Path) -> AppResult<Vec<u32>> {
 #[cfg(target_os = "macos")]
 fn verify_macos_listener_owner(executable: &Path, port: u16) -> AppResult<bool> {
     let output = Command::new("/usr/sbin/lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .args([
+            "-nP",
+            "-a",
+            &format!("-iTCP:{port}"),
+            "-sTCP:LISTEN",
+            "-Fpn",
+        ])
         .output()?;
     if !output.status.success() && output.stdout.is_empty() {
         return Ok(false);
     }
-    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse().ok())
-        .collect();
-    if pids.is_empty() {
+    let mut current_pid = None;
+    let mut listeners = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            current_pid = value.parse::<u32>().ok();
+        } else if let (Some(pid), Some(address)) = (current_pid, line.strip_prefix('n')) {
+            listeners.push((pid, address.to_owned()));
+        }
+    }
+    if listeners.is_empty()
+        || listeners
+            .iter()
+            .any(|(_, address)| !macos_listener_is_loopback(address, port))
+    {
         return Ok(false);
     }
-    for pid in pids {
+    listeners.sort_by_key(|(pid, _)| *pid);
+    listeners.dedup_by_key(|(pid, _)| *pid);
+    for (pid, _) in listeners {
         if !macos_pid_descends_from_executable(pid, executable)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_listener_is_loopback(address: &str, port: u16) -> bool {
+    let address = address.strip_suffix(" (LISTEN)").unwrap_or(address);
+    address == format!("127.0.0.1:{port}") || address == format!("[::1]:{port}")
 }
 
 #[cfg(target_os = "macos")]
@@ -485,5 +508,14 @@ mod tests {
             ..install
         };
         assert_eq!(mac.preferred_port(), 9341);
+    }
+
+    #[test]
+    fn macos_listener_addresses_must_be_loopback_only() {
+        assert!(macos_listener_is_loopback("127.0.0.1:9341", 9341));
+        assert!(macos_listener_is_loopback("[::1]:9341", 9341));
+        assert!(!macos_listener_is_loopback("*:9341", 9341));
+        assert!(!macos_listener_is_loopback("0.0.0.0:9341", 9341));
+        assert!(!macos_listener_is_loopback("127.0.0.1:9342", 9341));
     }
 }
