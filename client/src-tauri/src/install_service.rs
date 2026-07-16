@@ -140,27 +140,34 @@ async fn download_theme_assets(
 }
 
 async fn download(client: &Client, url: &str, limit: usize) -> AppResult<Vec<u8>> {
-    let response = client.get(url).send().await?.error_for_status()?;
-    if response
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let advertised_length = response
         .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > limit)
-    {
+        .and_then(|value| value.parse::<usize>().ok());
+    if advertised_length.is_some_and(|length| length > limit) {
         return Err(AppError::UnsafeAsset(format!(
             "资源超过 {} MiB",
             limit / 1024 / 1024
         )));
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > limit {
+    let mut bytes = Vec::with_capacity(advertised_length.unwrap_or_default().min(limit));
+    while let Some(chunk) = response.chunk().await? {
+        extend_with_limit(&mut bytes, &chunk, limit)?;
+    }
+    Ok(bytes)
+}
+
+fn extend_with_limit(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> AppResult<()> {
+    if bytes.len().saturating_add(chunk.len()) > limit {
         return Err(AppError::UnsafeAsset(format!(
             "资源超过 {} MiB",
             limit / 1024 / 1024
         )));
     }
-    Ok(bytes.to_vec())
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn image_extension(bytes: &[u8], label: &str) -> AppResult<&'static str> {
@@ -186,7 +193,7 @@ fn validate_css(css: &str) -> AppResult<()> {
         "@import",
         "http://",
         "https://",
-        "file://",
+        "file:",
         "javascript:",
         "-moz-binding",
     ];
@@ -331,6 +338,7 @@ mod tests {
         );
         assert!(validate_css(r".group\/home { color: var(--accent); }").is_ok());
         assert!(validate_css("a { background: url(./local-image.png); }").is_ok());
+        assert!(validate_css("a { background: url(file:/Users/test/secret.png); }").is_err());
     }
 
     #[test]
@@ -340,6 +348,14 @@ mod tests {
             "png"
         );
         assert!(image_extension(b"<svg onload='alert(1)'>", "test").is_err());
+    }
+
+    #[test]
+    fn enforces_download_limits_per_chunk() {
+        let mut bytes = vec![1, 2, 3];
+        assert!(extend_with_limit(&mut bytes, &[4, 5], 5).is_ok());
+        assert!(extend_with_limit(&mut bytes, &[6], 5).is_err());
+        assert_eq!(bytes, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
