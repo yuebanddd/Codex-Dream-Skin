@@ -169,10 +169,32 @@ impl RuntimeManager {
                 reuse = Some((record.clone(), install.clone()));
             }
         }
+        if reuse.is_none() {
+            if let Some(record) = &previous_record {
+                let fresh_install = CodexInstall::discover()?;
+                if validate_saved_install(&fresh_install, record).is_ok()
+                    && verify_endpoint(&self.http, &fresh_install, record)
+                        .await
+                        .is_ok()
+                {
+                    reuse = Some((record.clone(), fresh_install));
+                }
+            }
+        }
 
         let (record, install, child) = if let Some((active, install)) = reuse {
-            cdp::apply_to_verified_targets(&self.http, active.port, &active.browser_id, &payload)
-                .await?;
+            if let Err(error) = cdp::apply_to_verified_targets(
+                &self.http,
+                active.port,
+                &active.browser_id,
+                &payload,
+            )
+            .await
+            {
+                return self
+                    .fail_existing_session(active, install, previous_child, error.to_string())
+                    .await;
+            }
             (
                 RuntimeRecord {
                     source_id: installed.source_id.clone(),
@@ -191,6 +213,16 @@ impl RuntimeManager {
             }
             let install = CodexInstall::discover()?;
             if install.is_running()? {
+                if let Some(record) = previous_record {
+                    return self
+                        .fail_existing_session(
+                            record,
+                            previous_install.unwrap_or(install),
+                            previous_child,
+                            "Codex 正在运行，但现有 CDP 会话暂时无法重新验证；会话记录已保留，请重试或恢复原生",
+                        )
+                        .await;
+                }
                 return self
                     .fail_start(
                         &installed,
@@ -329,15 +361,15 @@ impl RuntimeManager {
         tauri::async_runtime::spawn(async move {
             let mut ticker = interval(Duration::from_secs(2));
             let mut failures = 0_u8;
-            let mut ticks = 0_u8;
             loop {
                 tokio::select! {
                     changed = cancelled.changed() => {
                         if changed.is_err() || *cancelled.borrow() { break; }
                     }
                     _ = ticker.tick() => {
-                        ticks = ticks.wrapping_add(1);
-                        let owner_ok = ticks % 5 != 0 || install.verify_listener_owner(record.port).unwrap_or(false);
+                        let owner_ok = install
+                            .verify_listener_owner(record.port)
+                            .unwrap_or(false);
                         let applied = owner_ok && cdp::apply_to_verified_targets(
                             &manager.http,
                             record.port,
@@ -391,6 +423,22 @@ impl RuntimeManager {
             port: None,
             message: message.clone(),
         };
+        Err(AppError::Runtime(message))
+    }
+
+    async fn fail_existing_session<T>(
+        &self,
+        record: RuntimeRecord,
+        install: CodexInstall,
+        child: Option<Child>,
+        message: impl Into<String>,
+    ) -> AppResult<T> {
+        let message = message.into();
+        let mut inner = self.inner.lock().await;
+        inner.record = Some(record.clone());
+        inner.install = Some(install);
+        inner.child = child;
+        inner.status = status_for_record("error", &record, &message);
         Err(AppError::Runtime(message))
     }
 
@@ -539,5 +587,49 @@ mod tests {
         assert!(validate_saved_install(&install, &record).is_ok());
         record.codex_identity = "other".into();
         assert!(validate_saved_install(&install, &record).is_err());
+    }
+
+    #[tokio::test]
+    async fn transient_failure_keeps_a_saved_session_recoverable() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("lumadrobe-runtime-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("runtime.json");
+        let record = RuntimeRecord {
+            schema_version: 1,
+            source_id: "source".into(),
+            skin_id: "night".into(),
+            version: "1".into(),
+            port: 9341,
+            browser_id: "browser".into(),
+            platform: "macos".into(),
+            executable: "/Applications/ChatGPT.app/test".into(),
+            codex_identity: "official".into(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let manager = RuntimeManager::new(path.clone()).unwrap();
+        let install = CodexInstall {
+            platform: "macos".into(),
+            executable: PathBuf::from(&record.executable),
+            bundle_path: None,
+            version: "1".into(),
+            identity: "official".into(),
+        };
+
+        let result: AppResult<()> = manager
+            .fail_existing_session(record.clone(), install, None, "transient")
+            .await;
+
+        assert!(result.is_err());
+        assert!(path.exists());
+        let inner = manager.inner.lock().await;
+        assert_eq!(inner.record.as_ref().unwrap().browser_id, record.browser_id);
+        assert_eq!(inner.status.phase, "error");
+        drop(inner);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
