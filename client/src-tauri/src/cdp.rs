@@ -120,6 +120,19 @@ pub async fn apply_to_verified_targets(
     Ok(applied)
 }
 
+pub async fn count_codex_targets(client: &Client, port: u16, browser_id: &str) -> AppResult<usize> {
+    let targets = verified_targets(client, port, browser_id).await?;
+    let guarded_probe = guarded_expression("true");
+    let mut verified = 0;
+    for target in targets {
+        let values = evaluate_many(&target, port, &[&guarded_probe]).await?;
+        if probe_is_codex(values.first()) {
+            verified += 1;
+        }
+    }
+    Ok(verified)
+}
+
 pub async fn remove_from_verified_targets(
     client: &Client,
     port: u16,
@@ -325,5 +338,13 @@ mod tests {
         item.url = "app://codex/home".into();
         item.id = "../browser".into();
         assert!(!valid_page_target(&item, 9341));
+    }
+
+    #[test]
+    fn guarded_actions_run_only_after_the_codex_probe() {
+        let guarded = guarded_expression("window.__testAction = true");
+        let probe = guarded.find("if (!checked.codex)").unwrap();
+        let action = guarded.find("window.__testAction").unwrap();
+        assert!(probe < action);
     }
 }

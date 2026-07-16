@@ -526,9 +526,9 @@ async fn wait_until_ready(
                         "CDP 端口监听者不是已验证的官方 Codex".into(),
                     ));
                 }
-                match cdp::verified_targets(http, port, &identity.id).await {
-                    Ok(targets) if !targets.is_empty() => return Ok((identity.id, targets.len())),
-                    Ok(_) => last_error = "CDP 尚未出现 app:// 页面".into(),
+                match cdp::count_codex_targets(http, port, &identity.id).await {
+                    Ok(count) if count > 0 => return Ok((identity.id, count)),
+                    Ok(_) => last_error = "Codex 渲染页尚未完成 DOM 初始化".into(),
                     Err(error) => last_error = error.to_string(),
                 }
             }
