@@ -398,9 +398,7 @@ mod tests {
         assert!(validate_css(r".group\/home { color: var(--accent); }").is_ok());
         assert!(validate_css("a { background: url(./local-image.png); }").is_ok());
         assert!(validate_css("a { background: url(file:/Users/test/secret.png); }").is_err());
-        assert!(
-            validate_css(r#"a{content:"/*";background:url(//tracker.example/p)}"#).is_err()
-        );
+        assert!(validate_css(r#"a{content:"/*";background:url(//tracker.example/p)}"#).is_err());
     }
 
     #[test]
