@@ -387,12 +387,28 @@ impl RuntimeManager {
 
         let install = match install {
             Some(install) => install,
-            None => CodexInstall::discover()?,
+            None => match CodexInstall::discover() {
+                Ok(install) => install,
+                Err(error) => {
+                    return self
+                        .fail_recoverable_session(record, None, child, error.to_string())
+                        .await;
+                }
+            },
         };
         let verified = validate_saved_install(&install, &record).is_ok()
             && verify_endpoint(&self.http, &install, &record).await.is_ok();
         if !verified {
-            self.persist(None)?;
+            if let Err(error) = self.persist(None) {
+                return self
+                    .fail_recoverable_session(
+                        record,
+                        Some(install),
+                        child,
+                        format!("会话已失效，但运行状态无法清理：{error}"),
+                    )
+                    .await;
+            }
             let status = RuntimeStatus::stopped(
                 "记录中的 CDP 会话已经不存在；未触碰任何未验证进程，状态已清理",
             );
@@ -413,8 +429,21 @@ impl RuntimeManager {
             inner.status = status_for_record("error", &record, error.to_string());
             return Err(error);
         }
-        install.launch_normally()?;
-        self.persist(None)?;
+        if let Err(error) = install.launch_normally() {
+            return self
+                .fail_recoverable_session(record, Some(install), child, error.to_string())
+                .await;
+        }
+        if let Err(error) = self.persist(None) {
+            return self
+                .fail_recoverable_session(
+                    record,
+                    Some(install),
+                    None,
+                    format!("Codex 已恢复原生启动，但运行状态无法清理：{error}"),
+                )
+                .await;
+        }
         let status = RuntimeStatus::stopped("已恢复 Codex 原生外观并重新启动");
         let mut inner = self.inner.lock().await;
         inner.record = None;
@@ -451,6 +480,7 @@ impl RuntimeManager {
             generation
         };
         let manager = Arc::clone(self);
+        let theme_key = format!("{}:{}@{}", record.source_id, record.skin_id, record.version);
         tauri::async_runtime::spawn(async move {
             let mut ticker = interval(Duration::from_secs(2));
             let mut failures = 0_u8;
@@ -463,10 +493,11 @@ impl RuntimeManager {
                         let owner_ok = install
                             .verify_listener_owner(record.port)
                             .unwrap_or(false);
-                        let applied = owner_ok && cdp::apply_to_verified_targets(
+                        let applied = owner_ok && cdp::ensure_theme_on_verified_targets(
                             &manager.http,
                             record.port,
                             &record.browser_id,
+                            &theme_key,
                             &payload,
                         ).await.is_ok();
                         if applied {

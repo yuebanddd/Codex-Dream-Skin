@@ -275,9 +275,13 @@ fn discover_macos() -> AppResult<CodexInstall> {
             );
         }
     }
-    candidates.sort();
-    candidates.dedup();
-    for bundle in candidates {
+    let mut unique_candidates = Vec::new();
+    for candidate in candidates {
+        if !unique_candidates.contains(&candidate) {
+            unique_candidates.push(candidate);
+        }
+    }
+    for bundle in unique_candidates {
         let plist = bundle.join("Contents/Info.plist");
         if !plist.is_file() {
             continue;

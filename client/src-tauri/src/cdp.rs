@@ -120,6 +120,53 @@ pub async fn apply_to_verified_targets(
     Ok(applied)
 }
 
+pub async fn ensure_theme_on_verified_targets(
+    client: &Client,
+    port: u16,
+    browser_id: &str,
+    theme_key: &str,
+    payload: &str,
+) -> AppResult<usize> {
+    let targets = verified_targets(client, port, browser_id).await?;
+    let health = guarded_expression(&theme_health_expression(theme_key)?);
+    let mut guarded_payload = None;
+    let mut healthy = 0;
+    let mut last_error = None;
+    for target in targets {
+        match evaluate_many(&target, port, &[&health]).await {
+            Ok(values)
+                if probe_is_codex(values.first()) && action_result_is_true(values.first()) =>
+            {
+                healthy += 1;
+                continue;
+            }
+            Ok(values) if probe_is_codex(values.first()) => {}
+            Ok(_) => {
+                last_error = Some("页面未通过 Codex DOM 标记校验".to_string());
+                continue;
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        }
+
+        let guarded_payload = guarded_payload.get_or_insert_with(|| guarded_expression(payload));
+        match evaluate_many(&target, port, &[guarded_payload.as_str()]).await {
+            Ok(values) if probe_is_codex(values.first()) => healthy += 1,
+            Ok(_) => last_error = Some("页面在重注入前未通过 Codex DOM 标记校验".to_string()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    if healthy == 0 {
+        return Err(AppError::Runtime(format!(
+            "没有找到健康的 Codex 主题渲染页：{}",
+            last_error.unwrap_or_else(|| "目标列表为空".into())
+        )));
+    }
+    Ok(healthy)
+}
+
 pub async fn count_codex_targets(client: &Client, port: u16, browser_id: &str) -> AppResult<usize> {
     let targets = verified_targets(client, port, browser_id).await?;
     let guarded_probe = guarded_expression("true");
@@ -240,6 +287,24 @@ fn probe_is_codex(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
+fn action_result_is_true(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| value.get("result"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn theme_health_expression(theme_key: &str) -> AppResult<String> {
+    let key = serde_json::to_string(theme_key)?;
+    Ok(format!(
+        r#"(() => {{
+  const state = window.__LUMADROBE_RUNTIME__;
+  if (state?.themeKey !== {key} || typeof state?.ensure !== "function") return false;
+  try {{ state.ensure(); return true; }} catch {{ return false; }}
+}})()"#
+    ))
+}
+
 fn guarded_expression(action: &str) -> String {
     format!(
         "(() => {{ const checked = ({PROBE_EXPRESSION}); if (!checked.codex) return checked; return {{ codex: true, result: ({action}) }}; }})()"
@@ -346,5 +411,13 @@ mod tests {
         let probe = guarded.find("if (!checked.codex)").unwrap();
         let action = guarded.find("window.__testAction").unwrap();
         assert!(probe < action);
+    }
+
+    #[test]
+    fn watcher_health_probe_is_small_and_theme_specific() {
+        let expression = theme_health_expression("source:night@1.0.0").unwrap();
+        assert!(expression.contains("source:night@1.0.0"));
+        assert!(expression.contains("state.ensure()"));
+        assert!(!expression.contains("data:image"));
     }
 }
