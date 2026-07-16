@@ -1,4 +1,6 @@
-# Dream Skin Git Repository Source Protocol v1
+# LumaDrobe Git Repository Source Protocol v1
+
+为兼容已经发布的仓库，v1 继续使用 `dreamskin-source.json` 作为固定入口文件名。
 
 ## 入口
 
@@ -60,7 +62,9 @@ https://github.com/owner/repository?ref=release
 - Renderer 注入脚本只能随客户端版本发布
 - 自定义 CSS 必须经过用户信任确认和静态检查
 - 客户端拒绝 CSS 中的远程资源、`@import` 和仓库外路径
-- 客户端下载资源后验证清单记录的哈希；哈希字段将在 v1.1 加入
+- 客户端下载资源后记录 SHA-256；由发布者声明并校验预期哈希的字段将在 v1.1 加入
+- 背景图最大 32 MiB，预览图最大 8 MiB，CSS 最大 1 MiB
+- 图片仅接受 PNG、JPEG 和 WebP 文件签名，不能通过伪造扩展名绕过
 - 第一版只读取公开 GitHub 仓库，不接收或保存 GitHub Token
 
 ## 限制
@@ -69,3 +73,4 @@ https://github.com/owner/repository?ref=release
 - `id` 最多 80 个 ASCII 字符，只允许字母、数字、`.`、`_`、`-`
 - Git ref 最多 200 个字符
 - 资源路径最多 500 个字符
+- CSS 必须是 UTF-8，且不得包含远程 URL、`@import`、`file:`、`javascript:` 或 `-moz-binding`

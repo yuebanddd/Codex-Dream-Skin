@@ -59,6 +59,27 @@ pub struct CatalogSkin {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct InstalledSkin {
+    pub source_id: String,
+    pub source_name: String,
+    pub skin_id: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub installed_at: String,
+    pub install_dir: String,
+    pub background_path: String,
+    #[serde(default)]
+    pub preview_path: Option<String>,
+    #[serde(default)]
+    pub css_path: Option<String>,
+    #[serde(default)]
+    pub asset_hashes: BTreeMap<String, String>,
+    pub manifest: SkinManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceRecord {
     pub id: String,
     pub repository_url: String,

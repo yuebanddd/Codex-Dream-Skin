@@ -159,6 +159,7 @@ fn validate_skin_manifest(expected_id: &str, manifest: &SkinManifest) -> AppResu
         )));
     }
     validate_id(&manifest.id)?;
+    validate_storage_component(&manifest.version, "版本")?;
     if manifest.id != expected_id {
         return Err(AppError::InvalidManifest(format!(
             "皮肤索引 ID {expected_id} 与清单 ID {} 不一致",
@@ -184,15 +185,36 @@ fn validate_skin_manifest(expected_id: &str, manifest: &SkinManifest) -> AppResu
 }
 
 fn validate_id(value: &str) -> AppResult<()> {
+    validate_storage_component(value, "ID")
+}
+
+fn validate_storage_component(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || is_windows_reserved_component(value)
         || value.len() > 80
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(AppError::InvalidManifest(format!("无效 ID：{value}")));
+        return Err(AppError::InvalidManifest(format!("无效{label}：{value}")));
     }
     Ok(())
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    if ["con", "prn", "aux", "nul", "conin$", "conout$"]
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && (bytes[..3].eq_ignore_ascii_case(b"com") || bytes[..3].eq_ignore_ascii_case(b"lpt"))
+        && matches!(bytes[3], b'0'..=b'9')
 }
 
 fn validate_component(value: &str, label: &str) -> AppResult<()> {
@@ -259,5 +281,16 @@ mod tests {
     #[test]
     fn rejects_parent_resource_paths() {
         assert!(validate_repo_path("../secret.png").is_err());
+    }
+
+    #[test]
+    fn rejects_dot_only_manifest_ids() {
+        assert!(validate_id(".").is_err());
+        assert!(validate_id("..").is_err());
+        assert!(validate_id(".night").is_err());
+        assert!(validate_id("night.").is_err());
+        assert!(validate_id("CON").is_err());
+        assert!(validate_id("nul.json").is_err());
+        assert!(validate_id("LPT9").is_err());
     }
 }

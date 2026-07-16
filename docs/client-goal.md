@@ -1,8 +1,10 @@
-# Codex Dream Skin Desktop · 产品目标
+# LumaDrobe Desktop · 产品目标
 
 ## 产品定位
 
-Codex Dream Skin Desktop 是一个去中心化的 Codex 主题衣橱：任何人都可以用公开 GitHub 仓库发布皮肤，用户通过仓库地址订阅、浏览、导入、应用、导出和更新主题。
+LumaDrobe 是一个去中心化的 Codex 主题衣橱：任何人都可以用公开 GitHub 仓库发布皮肤，用户通过仓库地址订阅、浏览、导入、应用、导出和更新主题。
+
+“Luma”代表光与氛围，“Drobe”来自 wardrobe。LumaDrobe 是独立产品名；`CODEX THEME ATELIER` 仅作为当前适配目标的产品副标题。
 
 项目不依赖中心服务，不包含账户、支付或商业授权系统。
 
@@ -37,10 +39,12 @@ Codex Dream Skin Desktop 是一个去中心化的 Codex 主题衣橱：任何人
 
 ### M2 · 本地主题库
 
-- 下载和校验主题资源
-- 安装、删除、导出主题包
-- 自定义 CSS 信任提示与静态安全检查
-- 本地选图生成主题
+- [x] 下载和校验主题资源
+- [x] 安装、更新和删除主题
+- [x] 自定义 CSS 静态安全检查
+- [x] 本地安装状态与离线主题目录
+- [ ] 导出主题包
+- [ ] 本地选图生成主题
 
 ### M3 · Rust 注入引擎
 

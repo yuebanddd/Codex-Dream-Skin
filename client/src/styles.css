@@ -372,6 +372,7 @@ input {
   background: linear-gradient(transparent, rgba(12, 9, 11, 0.8));
 }
 .imported-badge,
+.remote-badge,
 .using-badge {
   position: absolute;
   z-index: 2;
@@ -385,6 +386,10 @@ input {
 }
 .imported-badge {
   left: 10px;
+}
+.remote-badge {
+  left: 10px;
+  background: rgba(78, 55, 90, 0.72);
 }
 .using-badge {
   right: 10px;
@@ -544,6 +549,10 @@ input {
   font-size: 8px;
   cursor: pointer;
 }
+.fitting-actions > button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
 .fitting-actions .apply-button {
   flex-direction: row;
   gap: 9px;
@@ -551,6 +560,9 @@ input {
   border: 0;
   background: linear-gradient(135deg, #54172b, #361020);
   box-shadow: 0 8px 20px rgba(73, 17, 36, 0.22);
+}
+.fitting-actions .apply-button:disabled {
+  opacity: 0.78;
 }
 .apply-button > span {
   text-align: left;

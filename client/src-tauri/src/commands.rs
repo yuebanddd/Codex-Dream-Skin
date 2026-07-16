@@ -1,5 +1,8 @@
 use crate::github_source::fetch_source;
-use crate::models::{CatalogSkin, SourceRecord};
+use crate::install_service::{
+    install_skin as install_theme, installed_versions_share_directory, remove_installed_skin,
+};
+use crate::models::{CatalogSkin, InstalledSkin, SourceRecord};
 use crate::AppState;
 use tauri::State;
 
@@ -61,5 +64,100 @@ pub async fn remove_source(source_id: String, state: State<'_, AppState>) -> Res
         .lock()
         .await
         .remove(&source_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_installed_skins(
+    state: State<'_, AppState>,
+) -> Result<Vec<InstalledSkin>, String> {
+    Ok(state.installed.lock().await.list())
+}
+
+#[tauri::command]
+pub async fn install_skin(
+    source_id: String,
+    skin_id: String,
+    state: State<'_, AppState>,
+) -> Result<InstalledSkin, String> {
+    let _operation = state.theme_operation.lock().await;
+    let previous = {
+        let installed = state.installed.lock().await;
+        if installed.has_storage_collision(&source_id, &skin_id) {
+            return Err(format!(
+                "主题存储键与已安装主题仅大小写不同：{source_id}/{skin_id}"
+            ));
+        }
+        installed.get(&source_id, &skin_id)
+    };
+    let skin = state
+        .sources
+        .lock()
+        .await
+        .catalog()
+        .into_iter()
+        .find(|skin| skin.source_id == source_id && skin.manifest.id == skin_id)
+        .ok_or_else(|| format!("找不到主题：{source_id}/{skin_id}"))?;
+    let installed = install_theme(&state.http, &state.data_dir, &skin)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .installed
+        .lock()
+        .await
+        .upsert(installed.clone())
+        .map_err(|error| error.to_string())?;
+    if let Some(previous) = previous {
+        let shares_directory = installed_versions_share_directory(
+            &state.data_dir,
+            &previous.source_id,
+            &previous.skin_id,
+            &previous.version,
+            &installed.version,
+        )
+        .map_err(|error| error.to_string())?;
+        if previous.version != installed.version && !shares_directory {
+            // 新版本已经持久化；旧目录清理失败只会留下可重试的孤立文件。
+            if let Err(error) = remove_installed_skin(
+                &state.data_dir,
+                &previous.source_id,
+                &previous.skin_id,
+                &previous.version,
+            ) {
+                eprintln!(
+                    "旧主题目录清理失败：{}/{}@{}：{error}",
+                    previous.source_id, previous.skin_id, previous.version
+                );
+            }
+        }
+    }
+    Ok(installed)
+}
+
+#[tauri::command]
+pub async fn delete_installed_skin(
+    source_id: String,
+    skin_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _operation = state.theme_operation.lock().await;
+    let installed = state
+        .installed
+        .lock()
+        .await
+        .get(&source_id, &skin_id)
+        .ok_or_else(|| format!("主题尚未安装：{source_id}/{skin_id}"))?;
+    remove_installed_skin(
+        &state.data_dir,
+        &installed.source_id,
+        &installed.skin_id,
+        &installed.version,
+    )
+    .map_err(|error| error.to_string())?;
+    state
+        .installed
+        .lock()
+        .await
+        .remove(&source_id, &skin_id)
         .map_err(|error| error.to_string())
 }
