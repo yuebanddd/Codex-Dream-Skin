@@ -212,9 +212,9 @@ fn validate_ref(value: &str) -> AppResult<()> {
         || value.len() > 200
         || value.contains("..")
         || value.starts_with('/')
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
     {
         return Err(AppError::InvalidSource("无效的 Git ref".into()));
     }
@@ -225,7 +225,9 @@ fn validate_repo_path(value: &str) -> AppResult<()> {
     if value.is_empty()
         || value.len() > 500
         || value.starts_with('/')
-        || value.split('/').any(|segment| segment.is_empty() || segment == "..")
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "..")
         || value.contains('\\')
     {
         return Err(AppError::InvalidManifest(format!(
@@ -241,10 +243,9 @@ mod tests {
 
     #[test]
     fn parses_repository_and_ref() {
-        let source = parse_github_source(
-            "https://github.com/yuebanddd/Codex-Dream-Skin?ref=release",
-        )
-        .unwrap();
+        let source =
+            parse_github_source("https://github.com/yuebanddd/Codex-Dream-Skin?ref=release")
+                .unwrap();
         assert_eq!(source.owner, "yuebanddd");
         assert_eq!(source.repository, "Codex-Dream-Skin");
         assert_eq!(source.requested_ref.as_deref(), Some("release"));

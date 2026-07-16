@@ -22,7 +22,10 @@ impl SourceStore {
     }
 
     pub fn get(&self, source_id: &str) -> Option<SourceRecord> {
-        self.sources.iter().find(|item| item.id == source_id).cloned()
+        self.sources
+            .iter()
+            .find(|item| item.id == source_id)
+            .cloned()
     }
 
     pub fn catalog(&self) -> Vec<CatalogSkin> {
