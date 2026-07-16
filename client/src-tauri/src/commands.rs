@@ -2,7 +2,7 @@ use crate::github_source::fetch_source;
 use crate::install_service::{
     install_skin as install_theme, installed_versions_share_directory, remove_installed_skin,
 };
-use crate::models::{CatalogSkin, InstalledSkin, SourceRecord};
+use crate::models::{CatalogSkin, InstalledSkin, RuntimeStatus, SourceRecord};
 use crate::AppState;
 use tauri::State;
 
@@ -81,6 +81,9 @@ pub async fn install_skin(
     state: State<'_, AppState>,
 ) -> Result<InstalledSkin, String> {
     let _operation = state.theme_operation.lock().await;
+    if state.runtime.is_active_theme(&source_id, &skin_id).await {
+        return Err("该主题正在运行，请先恢复原生外观再更新或重新安装".into());
+    }
     let previous = {
         let installed = state.installed.lock().await;
         if installed.has_storage_collision(&source_id, &skin_id) {
@@ -141,6 +144,9 @@ pub async fn delete_installed_skin(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let _operation = state.theme_operation.lock().await;
+    if state.runtime.is_active_theme(&source_id, &skin_id).await {
+        return Err("该主题正在运行，请先恢复原生外观再删除".into());
+    }
     let installed = state
         .installed
         .lock()
@@ -159,5 +165,40 @@ pub async fn delete_installed_skin(
         .lock()
         .await
         .remove(&source_id, &skin_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+    Ok(state.runtime.status().await)
+}
+
+#[tauri::command]
+pub async fn apply_and_launch(
+    source_id: String,
+    skin_id: String,
+    state: State<'_, AppState>,
+) -> Result<RuntimeStatus, String> {
+    let _operation = state.theme_operation.lock().await;
+    let installed = state
+        .installed
+        .lock()
+        .await
+        .get(&source_id, &skin_id)
+        .ok_or_else(|| format!("主题尚未安装：{source_id}/{skin_id}"))?;
+    state
+        .runtime
+        .apply(installed)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_native(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+    let _operation = state.theme_operation.lock().await;
+    state
+        .runtime
+        .restore()
+        .await
         .map_err(|error| error.to_string())
 }

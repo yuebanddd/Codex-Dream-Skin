@@ -53,3 +53,12 @@ export interface InstalledSkin {
   assetHashes: Record<string, string>;
   manifest: SkinManifest;
 }
+
+export interface RuntimeStatus {
+  phase: "stopped" | "checking" | "starting" | "running" | "stopping" | "error";
+  activeSourceId?: string;
+  activeSkinId?: string;
+  activeVersion?: string;
+  port?: number;
+  message: string;
+}

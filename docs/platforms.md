@@ -3,50 +3,59 @@
 ## 运行模型（两边相同）
 
 ```text
-用户本机主题工具
-    │  启动官方 Codex + 本机 CDP
+LumaDrobe Desktop（React + Rust）
+    │  验证官方应用身份，启动 loopback CDP
     ▼
 官方 Codex Desktop（不改 asar / 签名）
-    │  注入 CSS + 装饰 DOM
+    │  Rust CDP 注入内置适配器 + 主题静态 CSS
     ▼
-仍用原生侧栏 / 输入框 / 建议卡
+仍使用原生项目、任务、对话与配置
 ```
+
+订阅仓库只能提供声明式清单、PNG/JPEG/WebP 和通过静态检查的 CSS。Renderer JavaScript 适配器随 LumaDrobe 发布，不从 Git 仓库下载。
+
+## LumaDrobe v0.3 安全边界
+
+- CDP 固定绑定 `127.0.0.1`，仅从平台首选端口后的 100 个端口中选择空闲端口
+- 每次注入前验证监听进程属于已验证的官方 Codex
+- macOS 校验 `com.openai.codex`、完整代码签名和 Team ID `2DC432GLL2`
+- Windows 只接受非开发模式、`SignatureKind=Store` 的 `OpenAI.Codex` Appx 包
+- `/json/version` 的浏览器 ID用于锚定会话；身份改变后停止自动重注入
+- WebSocket 只接受同端口 loopback 地址和 `/devtools/page/<target-id>` 形状
+- 目标必须同时是 `app://` 页面并通过 Codex shell DOM 标记检查
+- 恢复操作在重新验证应用、监听者与浏览器 ID 后才关闭并重启 Codex
+- 不修改官方应用包、`app.asar`、代码签名、API Key、Base URL 或 `~/.codex/config.toml`
 
 ## 路径速查
 
-### macOS
+| 用途 | macOS | Windows |
+|---|---|---|
+| LumaDrobe 数据 | `~/Library/Application Support/com.dreamskin.codex` | `%APPDATA%\\com.dreamskin.codex` |
+| 已安装主题 | 应用数据目录下 `themes/` | 应用数据目录下 `themes/` |
+| 订阅缓存 | `sources.json` | `sources.json` |
+| 本地主题库 | `installed-skins.json` | `installed-skins.json` |
+| 活动会话 | `runtime.json` | `runtime.json` |
+| 首选 CDP 端口 | `9341` | `9335` |
 
-| 用途 | 路径 |
-|------|------|
-| 源码（本整理包） | `Codex-Dream-Skin/macos/` |
-| 安装后引擎 | `~/.codex/codex-dream-skin-studio` |
-| 状态 / 日志 | `~/Library/Application Support/CodexDreamSkinStudio` |
-| Codex 配置 | `~/.codex/config.toml`（仅外观相关项可能被改，可恢复） |
+实际应用数据根目录由 Tauri `app_data_dir` 解析；表中路径用于说明平台位置，不应由业务代码手工拼接。
 
-### Windows
-
-| 用途 | 路径 |
-|------|------|
-| 源码（本整理包） | `Codex-Dream-Skin/windows/` |
-| 状态 / 日志 | `%LOCALAPPDATA%\CodexDreamSkin` |
-| Codex 配置 | `%USERPROFILE%\.codex\config.toml` |
-| 默认 CDP 端口 | 首选 `9335`，冲突时自动选空闲口（Mac 包默认从 `9341` 起） |
-
-## 能力矩阵
+## 客户端能力矩阵
 
 | 功能 | macOS | Windows |
-|------|:-----:|:-------:|
-| 安装脚本 | ✅ | ✅ |
-| 启动 + 注入 | ✅ | ✅ |
-| 一键恢复 | ✅ | ✅ |
-| 实机 verify / 截图 | ✅ | ✅ |
-| 用户选图定制 | ✅ | ❌ |
-| 官方签名校验 | ✅ | Store 签名类型 + 包身份 |
-| 客户部署提示词 | ✅ | ❌（可用 Mac 文案改写） |
-| 打客户 ZIP | ✅ `build-client-release.sh` | 手动压缩 `windows/` |
+|---|:---:|:---:|
+| 官方应用发现与身份验证 | ✅ | ✅ |
+| Rust CDP 启动与注入 | ✅ | ✅ |
+| 会话内热切换 | ✅ | ✅ |
+| Renderer 重载自动重注入 | ✅ | ✅ |
+| 恢复原生并重启 | ✅ | ✅ |
+| Git 仓库订阅与本地安装 | ✅ | ✅ |
+| 实机兼容性矩阵 | 待验收 | 待验收 |
 
-## 不要放进这个目录的东西
+`macos/` 与 `windows/` 下的旧脚本继续保留为兼容性参考，新的桌面产品能力以 `client/` 为准。
+
+## 不要提交的内容
 
 - API Key、`.codex/auth.json`
 - 中转站密钥、服务器私钥
-- 含客户隐私的实机截图（若要公开）
+- 含用户隐私的实机截图
+- 从远程主题仓库加载的可执行 JavaScript
