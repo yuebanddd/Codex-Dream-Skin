@@ -229,7 +229,10 @@ fn normalize_css_escapes(css: &str) -> String {
                 value = value * 16 + digit;
                 chars.next();
             }
-            if chars.peek().is_some_and(|value| value.is_ascii_whitespace()) {
+            if chars
+                .peek()
+                .is_some_and(|value| value.is_ascii_whitespace())
+            {
                 let whitespace = chars.next();
                 if whitespace == Some('\r') && chars.peek() == Some(&'\n') {
                     chars.next();
@@ -285,8 +288,7 @@ mod tests {
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
         assert!(validate_css(r"@\69mport url(h\74tps://example.com/theme.css);").is_err());
         assert!(
-            validate_css(r"a { background: url(\68\74\74\70\73\3a//example.com/pixel); }")
-                .is_err()
+            validate_css(r"a { background: url(\68\74\74\70\73\3a//example.com/pixel); }").is_err()
         );
         assert!(validate_css(r".group\/home { color: var(--accent); }").is_ok());
     }
