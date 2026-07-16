@@ -117,13 +117,18 @@ pub async fn install_skin(
         )
         .map_err(|error| error.to_string())?;
         if previous.version != installed.version && !shares_directory {
-            remove_installed_skin(
+            // 新版本已经持久化；旧目录清理失败只会留下可重试的孤立文件。
+            if let Err(error) = remove_installed_skin(
                 &state.data_dir,
                 &previous.source_id,
                 &previous.skin_id,
                 &previous.version,
-            )
-            .map_err(|error| error.to_string())?;
+            ) {
+                eprintln!(
+                    "旧主题目录清理失败：{}/{}@{}：{error}",
+                    previous.source_id, previous.skin_id, previous.version
+                );
+            }
         }
     }
     Ok(installed)
