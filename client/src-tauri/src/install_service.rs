@@ -181,15 +181,13 @@ fn image_extension(bytes: &[u8], label: &str) -> AppResult<&'static str> {
 }
 
 fn validate_css(css: &str) -> AppResult<()> {
-    let normalized = normalize_css_escapes(css);
+    let normalized = strip_css_comments(&normalize_css_escapes(css));
     let blocked = [
         "@import",
         "http://",
         "https://",
         "file://",
         "javascript:",
-        "url(//",
-        "url( //",
         "-moz-binding",
     ];
     if let Some(token) = blocked.iter().find(|token| normalized.contains(**token)) {
@@ -197,7 +195,45 @@ fn validate_css(css: &str) -> AppResult<()> {
             "CSS 包含被禁止的内容：{token}"
         )));
     }
+    if contains_scheme_relative_url(&normalized) {
+        return Err(AppError::UnsafeAsset(
+            "CSS 包含被禁止的协议相对 URL".into(),
+        ));
+    }
     Ok(())
+}
+
+fn strip_css_comments(css: &str) -> String {
+    let mut output = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        output.push_str(&rest[..start]);
+        let Some(end) = rest[start + 2..].find("*/") else {
+            return output;
+        };
+        rest = &rest[start + 2 + end + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn contains_scheme_relative_url(css: &str) -> bool {
+    let mut rest = css;
+    while let Some(start) = rest.find("url(") {
+        let mut value = rest[start + 4..].trim_start_matches(char::is_whitespace);
+        if let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|value| matches!(*value, '\'' | '"'))
+        {
+            value = value[quote.len_utf8()..].trim_start_matches(char::is_whitespace);
+        }
+        if value.starts_with("//") {
+            return true;
+        }
+        rest = &rest[start + 4..];
+    }
+    false
 }
 
 fn normalize_css_escapes(css: &str) -> String {
@@ -286,11 +322,21 @@ mod tests {
         assert!(validate_css("body { color: var(--accent); }").is_ok());
         assert!(validate_css("@import url(https://example.com/theme.css);").is_err());
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
+        assert!(
+            validate_css("a { background: url(  \t\n //tracker.example/pixel); }").is_err()
+        );
+        assert!(
+            validate_css("a { background: url(  \"//tracker.example/pixel\"); }").is_err()
+        );
+        assert!(
+            validate_css("a { background: url(/* hidden */ //tracker.example/pixel); }").is_err()
+        );
         assert!(validate_css(r"@\69mport url(h\74tps://example.com/theme.css);").is_err());
         assert!(
             validate_css(r"a { background: url(\68\74\74\70\73\3a//example.com/pixel); }").is_err()
         );
         assert!(validate_css(r".group\/home { color: var(--accent); }").is_ok());
+        assert!(validate_css("a { background: url(./local-image.png); }").is_ok());
     }
 
     #[test]

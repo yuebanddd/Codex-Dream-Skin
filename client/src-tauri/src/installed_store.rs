@@ -1,3 +1,4 @@
+use crate::atomic_file::replace_file;
 use crate::error::AppResult;
 use crate::models::InstalledSkin;
 use std::path::PathBuf;
@@ -53,7 +54,7 @@ impl InstalledStore {
         }
         let temporary = self.path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(&self.skins)?)?;
-        std::fs::rename(temporary, &self.path)?;
+        replace_file(&temporary, &self.path)?;
         Ok(())
     }
 }

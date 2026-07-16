@@ -1,3 +1,4 @@
+mod atomic_file;
 mod commands;
 mod error;
 mod github_source;
