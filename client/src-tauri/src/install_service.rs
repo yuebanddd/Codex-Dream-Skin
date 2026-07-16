@@ -224,7 +224,7 @@ fn image_extension(bytes: &[u8], label: &str) -> AppResult<&'static str> {
 }
 
 fn validate_css(css: &str) -> AppResult<()> {
-    let normalized = strip_css_comments(&normalize_css_escapes(css));
+    let normalized = normalize_css_escapes(&strip_css_comments(css));
     let blocked = [
         "@import",
         "http://",
@@ -246,15 +246,38 @@ fn validate_css(css: &str) -> AppResult<()> {
 
 fn strip_css_comments(css: &str) -> String {
     let mut output = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(start) = rest.find("/*") {
-        output.push_str(&rest[..start]);
-        let Some(end) = rest[start + 2..].find("*/") else {
-            return output;
-        };
-        rest = &rest[start + 2 + end + 2..];
+    let mut chars = css.chars().peekable();
+    let mut quote = None;
+    while let Some(character) = chars.next() {
+        if let Some(active_quote) = quote {
+            output.push(character);
+            if character == '\\' {
+                if let Some(escaped) = chars.next() {
+                    output.push(escaped);
+                }
+            } else if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            output.push(character);
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(comment_character) = chars.next() {
+                if comment_character == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+            output.push(' ');
+            continue;
+        }
+        output.push(character);
     }
-    output.push_str(rest);
     output
 }
 
@@ -375,6 +398,9 @@ mod tests {
         assert!(validate_css(r".group\/home { color: var(--accent); }").is_ok());
         assert!(validate_css("a { background: url(./local-image.png); }").is_ok());
         assert!(validate_css("a { background: url(file:/Users/test/secret.png); }").is_err());
+        assert!(
+            validate_css(r#"a{content:"/*";background:url(//tracker.example/p)}"#).is_err()
+        );
     }
 
     #[test]
