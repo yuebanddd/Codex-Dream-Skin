@@ -12,11 +12,7 @@ pub fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()>
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
-    let temporary: Vec<u16> = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination: Vec<u16> = destination
         .as_os_str()
         .encode_wide()
@@ -47,10 +43,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "lumadrobe-atomic-{}-{unique}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("lumadrobe-atomic-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let destination = directory.join("store.json");
         let temporary = directory.join("store.json.tmp");

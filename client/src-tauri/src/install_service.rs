@@ -196,9 +196,7 @@ fn validate_css(css: &str) -> AppResult<()> {
         )));
     }
     if contains_scheme_relative_url(&normalized) {
-        return Err(AppError::UnsafeAsset(
-            "CSS 包含被禁止的协议相对 URL".into(),
-        ));
+        return Err(AppError::UnsafeAsset("CSS 包含被禁止的协议相对 URL".into()));
     }
     Ok(())
 }
@@ -322,12 +320,8 @@ mod tests {
         assert!(validate_css("body { color: var(--accent); }").is_ok());
         assert!(validate_css("@import url(https://example.com/theme.css);").is_err());
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
-        assert!(
-            validate_css("a { background: url(  \t\n //tracker.example/pixel); }").is_err()
-        );
-        assert!(
-            validate_css("a { background: url(  \"//tracker.example/pixel\"); }").is_err()
-        );
+        assert!(validate_css("a { background: url(  \t\n //tracker.example/pixel); }").is_err());
+        assert!(validate_css("a { background: url(  \"//tracker.example/pixel\"); }").is_err());
         assert!(
             validate_css("a { background: url(/* hidden */ //tracker.example/pixel); }").is_err()
         );
