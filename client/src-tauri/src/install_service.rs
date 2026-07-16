@@ -367,6 +367,8 @@ fn write_asset(
 fn validate_component(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
         || value.starts_with('.')
+        || value.ends_with('.')
+        || is_windows_reserved_component(value)
         || value.len() > 80
         || !value
             .bytes()
@@ -375,6 +377,20 @@ fn validate_component(value: &str, label: &str) -> AppResult<()> {
         return Err(AppError::InvalidManifest(format!("{label} 无效")));
     }
     Ok(())
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    if ["con", "prn", "aux", "nul", "conin$", "conout$"]
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && (bytes[..3].eq_ignore_ascii_case(b"com") || bytes[..3].eq_ignore_ascii_case(b"lpt"))
+        && matches!(bytes[3], b'0'..=b'9')
 }
 
 #[cfg(test)]
@@ -424,6 +440,10 @@ mod tests {
         assert!(validate_component(".", "主题 ID").is_err());
         assert!(validate_component("..", "主题 ID").is_err());
         assert!(validate_component(".night", "主题 ID").is_err());
+        assert!(validate_component("night.", "主题 ID").is_err());
+        assert!(validate_component("CON", "主题 ID").is_err());
+        assert!(validate_component("nul.json", "主题 ID").is_err());
+        assert!(validate_component("LPT9", "主题 ID").is_err());
         assert!(validate_component("../escape", "主题 ID").is_err());
     }
 }

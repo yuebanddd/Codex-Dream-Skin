@@ -191,6 +191,8 @@ fn validate_id(value: &str) -> AppResult<()> {
 fn validate_storage_component(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
         || value.starts_with('.')
+        || value.ends_with('.')
+        || is_windows_reserved_component(value)
         || value.len() > 80
         || !value
             .bytes()
@@ -199,6 +201,20 @@ fn validate_storage_component(value: &str, label: &str) -> AppResult<()> {
         return Err(AppError::InvalidManifest(format!("无效{label}：{value}")));
     }
     Ok(())
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    if ["con", "prn", "aux", "nul", "conin$", "conout$"]
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && (bytes[..3].eq_ignore_ascii_case(b"com") || bytes[..3].eq_ignore_ascii_case(b"lpt"))
+        && matches!(bytes[3], b'0'..=b'9')
 }
 
 fn validate_component(value: &str, label: &str) -> AppResult<()> {
@@ -272,5 +288,9 @@ mod tests {
         assert!(validate_id(".").is_err());
         assert!(validate_id("..").is_err());
         assert!(validate_id(".night").is_err());
+        assert!(validate_id("night.").is_err());
+        assert!(validate_id("CON").is_err());
+        assert!(validate_id("nul.json").is_err());
+        assert!(validate_id("LPT9").is_err());
     }
 }
