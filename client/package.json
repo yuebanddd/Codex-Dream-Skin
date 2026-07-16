@@ -1,0 +1,30 @@
+{
+  "name": "codex-dream-skin-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:web": "vite",
+    "build": "tsc && vite build",
+    "build:desktop": "tauri build",
+    "check": "tsc --noEmit",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-opener": "^2.5.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "prettier": "^3.9.5",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}
