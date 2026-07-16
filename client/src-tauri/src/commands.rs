@@ -1,5 +1,7 @@
 use crate::github_source::fetch_source;
-use crate::install_service::{install_skin as install_theme, remove_installed_skin};
+use crate::install_service::{
+    install_skin as install_theme, installed_versions_share_directory, remove_installed_skin,
+};
 use crate::models::{CatalogSkin, InstalledSkin, SourceRecord};
 use crate::AppState;
 use tauri::State;
@@ -97,14 +99,24 @@ pub async fn install_skin(
         .await
         .upsert(installed.clone())
         .map_err(|error| error.to_string())?;
-    if let Some(previous) = previous.filter(|item| item.version != installed.version) {
-        remove_installed_skin(
+    if let Some(previous) = previous {
+        let shares_directory = installed_versions_share_directory(
             &state.data_dir,
             &previous.source_id,
             &previous.skin_id,
             &previous.version,
+            &installed.version,
         )
         .map_err(|error| error.to_string())?;
+        if previous.version != installed.version && !shares_directory {
+            remove_installed_skin(
+                &state.data_dir,
+                &previous.source_id,
+                &previous.skin_id,
+                &previous.version,
+            )
+            .map_err(|error| error.to_string())?;
+        }
     }
     Ok(installed)
 }

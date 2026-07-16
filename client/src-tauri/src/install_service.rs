@@ -79,18 +79,54 @@ pub fn remove_installed_skin(
     skin_id: &str,
     version: &str,
 ) -> AppResult<()> {
-    validate_component(source_id, "订阅源 ID")?;
-    validate_component(skin_id, "主题 ID")?;
-    validate_component(version, "主题版本")?;
-    let target = data_dir
-        .join("themes")
-        .join(source_id)
-        .join(skin_id)
-        .join(version);
+    let target = installed_skin_path(data_dir, source_id, skin_id, version)?;
     if target.exists() {
         std::fs::remove_dir_all(target)?;
     }
     Ok(())
+}
+
+pub fn installed_versions_share_directory(
+    data_dir: &Path,
+    source_id: &str,
+    skin_id: &str,
+    previous_version: &str,
+    current_version: &str,
+) -> AppResult<bool> {
+    let previous = installed_skin_path(data_dir, source_id, skin_id, previous_version)?;
+    let current = installed_skin_path(data_dir, source_id, skin_id, current_version)?;
+    match (previous.canonicalize(), current.canonicalize()) {
+        (Ok(previous), Ok(current)) => Ok(previous == current),
+        _ => Ok(paths_equal_for_platform(&previous, &current)),
+    }
+}
+
+fn installed_skin_path(
+    data_dir: &Path,
+    source_id: &str,
+    skin_id: &str,
+    version: &str,
+) -> AppResult<PathBuf> {
+    validate_component(source_id, "订阅源 ID")?;
+    validate_component(skin_id, "主题 ID")?;
+    validate_component(version, "主题版本")?;
+    Ok(data_dir
+        .join("themes")
+        .join(source_id)
+        .join(skin_id)
+        .join(version))
+}
+
+fn paths_equal_for_platform(left: &Path, right: &Path) -> bool {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        left == right
+    }
 }
 
 struct InstalledAssets {
