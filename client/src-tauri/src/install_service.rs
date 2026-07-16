@@ -384,10 +384,10 @@ mod tests {
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(  \t\n //tracker.example/pixel); }").is_err());
         assert!(validate_css("a { background: url(  \"//tracker.example/pixel\"); }").is_err());
-        assert!(
-            validate_css(r#"a { background-image: image-set("//tracker.example/pixel" 1x); }"#)
-                .is_err()
-        );
+        assert!(validate_css(
+            r#"a { background-image: image-set("//tracker.example/pixel" 1x); }"#
+        )
+        .is_err());
         assert!(
             validate_css("a { background: url(/* hidden */ //tracker.example/pixel); }").is_err()
         );
