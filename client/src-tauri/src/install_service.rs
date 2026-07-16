@@ -181,7 +181,7 @@ fn image_extension(bytes: &[u8], label: &str) -> AppResult<&'static str> {
 }
 
 fn validate_css(css: &str) -> AppResult<()> {
-    let normalized = css.to_ascii_lowercase();
+    let normalized = normalize_css_escapes(css);
     let blocked = [
         "@import",
         "http://",
@@ -198,6 +198,54 @@ fn validate_css(css: &str) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+fn normalize_css_escapes(css: &str) -> String {
+    let mut output = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            output.push(character.to_ascii_lowercase());
+            continue;
+        }
+
+        let Some(next) = chars.peek().copied() else {
+            output.push('\\');
+            break;
+        };
+        if matches!(next, '\n' | '\r' | '\u{000c}') {
+            chars.next();
+            if next == '\r' && chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            continue;
+        }
+        if next.is_ascii_hexdigit() {
+            let mut value = 0_u32;
+            for _ in 0..6 {
+                let Some(digit) = chars.peek().and_then(|value| value.to_digit(16)) else {
+                    break;
+                };
+                value = value * 16 + digit;
+                chars.next();
+            }
+            if chars.peek().is_some_and(|value| value.is_ascii_whitespace()) {
+                let whitespace = chars.next();
+                if whitespace == Some('\r') && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            output.push(
+                char::from_u32(value)
+                    .filter(|value| *value != '\0')
+                    .unwrap_or('\u{fffd}')
+                    .to_ascii_lowercase(),
+            );
+            continue;
+        }
+        output.push(chars.next().unwrap_or(next).to_ascii_lowercase());
+    }
+    output
 }
 
 fn write_asset(
@@ -235,6 +283,12 @@ mod tests {
         assert!(validate_css("body { color: var(--accent); }").is_ok());
         assert!(validate_css("@import url(https://example.com/theme.css);").is_err());
         assert!(validate_css("a { background: url(//tracker.example/pixel); }").is_err());
+        assert!(validate_css(r"@\69mport url(h\74tps://example.com/theme.css);").is_err());
+        assert!(
+            validate_css(r"a { background: url(\68\74\74\70\73\3a//example.com/pixel); }")
+                .is_err()
+        );
+        assert!(validate_css(r".group\/home { color: var(--accent); }").is_ok());
     }
 
     #[test]

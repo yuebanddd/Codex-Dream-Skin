@@ -122,11 +122,24 @@ function App() {
     () => sources.flatMap((source) => source.skins),
     [sources],
   );
-  const installedOnlySkins = useMemo(() => {
+  const catalogSkins = useMemo(() => {
+    const installedByKey = new Map(
+      installed.map((skin) => [`${skin.sourceId}:${skin.skinId}`, skin]),
+    );
     const remoteKeys = new Set(
       remoteSkins.map((skin) => `${skin.sourceId}:${skin.manifest.id}`),
     );
-    return installed
+    const subscribedSkins = remoteSkins.map((skin) => {
+      const local = installedByKey.get(`${skin.sourceId}:${skin.manifest.id}`);
+      if (!local || local.version !== skin.manifest.version) return skin;
+      return {
+        ...skin,
+        previewUrl: convertFileSrc(local.previewPath ?? local.backgroundPath),
+        backgroundUrl: convertFileSrc(local.backgroundPath),
+        cssUrl: local.cssPath ? convertFileSrc(local.cssPath) : undefined,
+      };
+    });
+    const localOnlySkins = installed
       .filter((skin) => !remoteKeys.has(`${skin.sourceId}:${skin.skinId}`))
       .map<CatalogSkin>((skin) => ({
         sourceId: skin.sourceId,
@@ -137,8 +150,8 @@ function App() {
         cssUrl: skin.cssPath ? convertFileSrc(skin.cssPath) : undefined,
         manifest: skin.manifest,
       }));
+    return [...subscribedSkins, ...localOnlySkins];
   }, [installed, remoteSkins]);
-  const catalogSkins = [...remoteSkins, ...installedOnlySkins];
   const skins = catalogSkins.length ? catalogSkins : featuredSkins;
   const skinKey = (skin: CatalogSkin) => `${skin.sourceId}:${skin.manifest.id}`;
   const selected =
