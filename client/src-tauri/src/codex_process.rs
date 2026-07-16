@@ -158,11 +158,6 @@ foreach ($listener in $listeners) {{
     }
 
     pub fn stop(&self, mut launched_child: Option<&mut Child>) -> AppResult<()> {
-        if let Some(child) = launched_child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-
         #[cfg(target_os = "macos")]
         {
             let _ = Command::new("/usr/bin/osascript")
@@ -173,9 +168,22 @@ foreach ($listener in $listeners) {{
                 thread::sleep(Duration::from_millis(250));
             }
             if self.is_running()? {
+                if let Some(child) = launched_child.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let force_deadline = Instant::now() + Duration::from_secs(5);
+                    while self.is_running()? && Instant::now() < force_deadline {
+                        thread::sleep(Duration::from_millis(250));
+                    }
+                }
+            }
+            if self.is_running()? {
                 return Err(AppError::Runtime(
-                    "Codex 未能安全退出；未强制结束进程，请手动退出后重试".into(),
+                    "Codex 未能安全退出；请手动退出后重试".into(),
                 ));
+            }
+            if let Some(child) = launched_child.as_mut() {
+                let _ = child.try_wait();
             }
             Ok(())
         }
@@ -213,6 +221,12 @@ foreach ($item in $alive) {
             if !result {
                 return Err(AppError::Runtime("无法安全结束官方 Codex 进程".into()));
             }
+            if let Some(child) = launched_child.as_mut() {
+                if child.try_wait()?.is_none() {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
             Ok(())
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -233,25 +247,59 @@ foreach ($item in $alive) {
 
 #[cfg(target_os = "macos")]
 fn discover_macos() -> AppResult<CodexInstall> {
-    let mut candidates = vec![PathBuf::from("/Applications/ChatGPT.app")];
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join("Applications/ChatGPT.app"));
+    let mut candidates = Vec::new();
+    if let Some(configured) = std::env::var_os("CODEX_APP_BUNDLE") {
+        if !configured.is_empty() {
+            candidates.push(PathBuf::from(configured));
+        }
     }
+    candidates.extend([
+        PathBuf::from("/Applications/ChatGPT.app"),
+        PathBuf::from("/Applications/Codex.app"),
+    ]);
+    if let Some(home) = std::env::var_os("HOME") {
+        let applications = PathBuf::from(home).join("Applications");
+        candidates.push(applications.join("ChatGPT.app"));
+        candidates.push(applications.join("Codex.app"));
+    }
+    if let Ok(output) = Command::new("/usr/bin/mdfind")
+        .arg("kMDItemCFBundleIdentifier == 'com.openai.codex'")
+        .output()
+    {
+        if output.status.success() {
+            candidates.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(PathBuf::from),
+            );
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
     for bundle in candidates {
         let plist = bundle.join("Contents/Info.plist");
         if !plist.is_file() {
             continue;
         }
-        let identifier = plutil_value(&plist, "CFBundleIdentifier")?;
+        let Ok(identifier) = plutil_value(&plist, "CFBundleIdentifier") else {
+            continue;
+        };
         if identifier != "com.openai.codex" {
             continue;
         }
-        verify_macos_signature(&bundle)?;
-        let executable_name = plutil_value(&plist, "CFBundleExecutable")?;
-        let version = plutil_value(&plist, "CFBundleShortVersionString")?;
+        if verify_macos_signature(&bundle).is_err() {
+            continue;
+        }
+        let Ok(executable_name) = plutil_value(&plist, "CFBundleExecutable") else {
+            continue;
+        };
+        let Ok(version) = plutil_value(&plist, "CFBundleShortVersionString") else {
+            continue;
+        };
         let executable = bundle.join("Contents/MacOS").join(executable_name);
         if !executable.is_file() {
-            return Err(AppError::Runtime("官方 Codex 可执行文件不存在".into()));
+            continue;
         }
         return Ok(CodexInstall {
             platform: "macos".into(),

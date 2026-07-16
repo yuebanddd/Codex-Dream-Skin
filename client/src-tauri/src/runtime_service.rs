@@ -131,7 +131,7 @@ impl RuntimeManager {
         cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
             .await?;
         self.start_watcher(record.clone(), install, None, payload)
-            .await?;
+            .await;
         Ok(())
     }
 
@@ -171,7 +171,20 @@ impl RuntimeManager {
         }
         if reuse.is_none() {
             if let Some(record) = &previous_record {
-                let fresh_install = CodexInstall::discover()?;
+                let fresh_install = match CodexInstall::discover() {
+                    Ok(install) => install,
+                    Err(error) => {
+                        return self
+                            .fail_apply_attempt(
+                                &installed,
+                                previous_record.clone(),
+                                previous_install.clone(),
+                                previous_child,
+                                error.to_string(),
+                            )
+                            .await;
+                    }
+                };
                 if validate_saved_install(&fresh_install, record).is_ok()
                     && verify_endpoint(&self.http, &fresh_install, record)
                         .await
@@ -192,7 +205,13 @@ impl RuntimeManager {
             .await
             {
                 return self
-                    .fail_existing_session(active, install, previous_child, error.to_string())
+                    .fail_apply_attempt(
+                        &installed,
+                        Some(active),
+                        Some(install),
+                        previous_child,
+                        error.to_string(),
+                    )
                     .await;
             }
             (
@@ -206,18 +225,56 @@ impl RuntimeManager {
                 previous_child,
             )
         } else {
-            if let Some(install) = &previous_install {
-                if previous_child.is_some() {
-                    install.stop(previous_child.as_mut())?;
+            if previous_child.is_some() {
+                if let Some(install) = previous_install.clone() {
+                    if let Err(error) = install.stop(previous_child.as_mut()) {
+                        return self
+                            .fail_apply_attempt(
+                                &installed,
+                                previous_record.clone(),
+                                Some(install),
+                                previous_child,
+                                error.to_string(),
+                            )
+                            .await;
+                    }
                 }
             }
-            let install = CodexInstall::discover()?;
-            if install.is_running()? {
-                if let Some(record) = previous_record {
+            let install = match CodexInstall::discover() {
+                Ok(install) => install,
+                Err(error) => {
                     return self
-                        .fail_existing_session(
-                            record,
-                            previous_install.unwrap_or(install),
+                        .fail_apply_attempt(
+                            &installed,
+                            previous_record.clone(),
+                            previous_install.clone(),
+                            previous_child,
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            };
+            let is_running = match install.is_running() {
+                Ok(is_running) => is_running,
+                Err(error) => {
+                    return self
+                        .fail_apply_attempt(
+                            &installed,
+                            previous_record.clone(),
+                            Some(install),
+                            previous_child,
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            };
+            if is_running {
+                if previous_record.is_some() {
+                    return self
+                        .fail_apply_attempt(
+                            &installed,
+                            previous_record.clone(),
+                            Some(install),
                             previous_child,
                             "Codex 正在运行，但现有 CDP 会话暂时无法重新验证；会话记录已保留，请重试或恢复原生",
                         )
@@ -230,8 +287,34 @@ impl RuntimeManager {
                     )
                     .await;
             }
-            let port = select_available_port(install.preferred_port())?;
-            let mut child = install.launch_with_cdp(port)?;
+            let port = match select_available_port(install.preferred_port()) {
+                Ok(port) => port,
+                Err(error) => {
+                    return self
+                        .fail_apply_attempt(
+                            &installed,
+                            previous_record.clone(),
+                            Some(install),
+                            previous_child,
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            };
+            let mut child = match install.launch_with_cdp(port) {
+                Ok(child) => child,
+                Err(error) => {
+                    return self
+                        .fail_apply_attempt(
+                            &installed,
+                            previous_record.clone(),
+                            Some(install),
+                            previous_child,
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            };
             let ready = wait_until_ready(&self.http, &install, port).await;
             let (browser_id, _) = match ready {
                 Ok(ready) => ready,
@@ -267,8 +350,18 @@ impl RuntimeManager {
             (record, install, Some(child))
         };
 
-        self.persist(Some(&record))?;
-        self.start_watcher(record, install, child, payload).await?;
+        if let Err(error) = self.persist(Some(&record)) {
+            return self
+                .fail_apply_attempt(
+                    &installed,
+                    Some(record),
+                    Some(install),
+                    child,
+                    format!("主题已经注入，但运行状态无法保存：{error}"),
+                )
+                .await;
+        }
+        self.start_watcher(record, install, child, payload).await;
         Ok(self.status().await)
     }
 
@@ -337,7 +430,7 @@ impl RuntimeManager {
         install: CodexInstall,
         child: Option<Child>,
         payload: String,
-    ) -> AppResult<()> {
+    ) {
         let (cancel, mut cancelled) = watch::channel(false);
         let generation = {
             let mut inner = self.inner.lock().await;
@@ -389,7 +482,6 @@ impl RuntimeManager {
                 }
             }
         });
-        Ok(())
     }
 
     async fn mark_watcher_error(&self, generation: u64, record: &RuntimeRecord) {
@@ -426,17 +518,33 @@ impl RuntimeManager {
         Err(AppError::Runtime(message))
     }
 
-    async fn fail_existing_session<T>(
+    async fn fail_apply_attempt<T>(
+        &self,
+        installed: &InstalledSkin,
+        record: Option<RuntimeRecord>,
+        install: Option<CodexInstall>,
+        child: Option<Child>,
+        message: impl Into<String>,
+    ) -> AppResult<T> {
+        let message = message.into();
+        let Some(record) = record else {
+            return self.fail_start(installed, message).await;
+        };
+        self.fail_recoverable_session(record, install, child, message)
+            .await
+    }
+
+    async fn fail_recoverable_session<T>(
         &self,
         record: RuntimeRecord,
-        install: CodexInstall,
+        install: Option<CodexInstall>,
         child: Option<Child>,
         message: impl Into<String>,
     ) -> AppResult<T> {
         let message = message.into();
         let mut inner = self.inner.lock().await;
         inner.record = Some(record.clone());
-        inner.install = Some(install);
+        inner.install = install;
         inner.child = child;
         inner.status = status_for_record("error", &record, &message);
         Err(AppError::Runtime(message))
@@ -621,7 +729,7 @@ mod tests {
         };
 
         let result: AppResult<()> = manager
-            .fail_existing_session(record.clone(), install, None, "transient")
+            .fail_recoverable_session(record.clone(), Some(install), None, "transient")
             .await;
 
         assert!(result.is_err());
