@@ -493,6 +493,8 @@ function FittingRoom({
   const key = `${skin.sourceId}:${skin.manifest.id}`;
   const installing = working === `install:${key}`;
   const deleting = working === `delete:${key}`;
+  const themeOperationActive =
+    working?.startsWith("install:") || working?.startsWith("delete:");
   const showcase = skin.sourceId === "builtin-showcase";
   const installed = status === "installed";
   const hasLocalVersion = status !== "remote";
@@ -535,7 +537,7 @@ function FittingRoom({
       <div className="fitting-actions">
         <button
           className="apply-button"
-          disabled={installed || showcase || installing}
+          disabled={installed || showcase || themeOperationActive}
           onClick={() => void onInstall(skin)}
         >
           {installing ? (
@@ -572,7 +574,7 @@ function FittingRoom({
         </button>
         <button
           className="delete-button"
-          disabled={!hasLocalVersion || deleting}
+          disabled={!hasLocalVersion || themeOperationActive}
           onClick={() => void onDelete(skin)}
         >
           {deleting ? (
