@@ -188,10 +188,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "lumadrobe-payload-{}-{unique}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("lumadrobe-payload-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let background = root.join("background.png");
         let bytes = b"\x89PNG\r\n\x1a\nfixture";

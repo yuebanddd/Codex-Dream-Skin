@@ -85,13 +85,13 @@ impl RuntimeManager {
             .record
             .as_ref()
             .is_some_and(|record| record.source_id == source_id && record.skin_id == skin_id)
-            && matches!(inner.status.phase.as_str(), "running" | "checking" | "error")
+            && matches!(
+                inner.status.phase.as_str(),
+                "running" | "checking" | "error"
+            )
     }
 
-    pub async fn recover(
-        self: &Arc<Self>,
-        installed_store: Arc<Mutex<InstalledStore>>,
-    ) {
+    pub async fn recover(self: &Arc<Self>, installed_store: Arc<Mutex<InstalledStore>>) {
         let record = {
             let inner = self.inner.lock().await;
             inner.record.clone()
@@ -107,11 +107,8 @@ impl RuntimeManager {
                 .as_ref()
                 .is_some_and(|current| current.browser_id == record.browser_id)
             {
-                inner.status = status_for_record(
-                    "error",
-                    &record,
-                    format!("上次的皮肤会话需要处理：{error}"),
-                );
+                inner.status =
+                    status_for_record("error", &record, format!("上次的皮肤会话需要处理：{error}"));
             }
         }
     }
@@ -131,22 +128,14 @@ impl RuntimeManager {
             .filter(|skin| skin.version == record.version)
             .ok_or_else(|| AppError::Runtime("上次应用的主题版本已不在本地主题库".into()))?;
         let payload = build_payload(&installed)?;
-        cdp::apply_to_verified_targets(
-            &self.http,
-            record.port,
-            &record.browser_id,
-            &payload,
-        )
-        .await?;
+        cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
+            .await?;
         self.start_watcher(record.clone(), install, None, payload)
             .await?;
         Ok(())
     }
 
-    pub async fn apply(
-        self: &Arc<Self>,
-        installed: InstalledSkin,
-    ) -> AppResult<RuntimeStatus> {
+    pub async fn apply(self: &Arc<Self>, installed: InstalledSkin) -> AppResult<RuntimeStatus> {
         let payload = build_payload(&installed)?;
         {
             let mut inner = self.inner.lock().await;
@@ -165,7 +154,11 @@ impl RuntimeManager {
             if let Some(cancel) = inner.cancel.take() {
                 let _ = cancel.send(true);
             }
-            (inner.record.clone(), inner.install.clone(), inner.child.take())
+            (
+                inner.record.clone(),
+                inner.install.clone(),
+                inner.child.take(),
+            )
         };
 
         let mut reuse = None;
@@ -178,13 +171,8 @@ impl RuntimeManager {
         }
 
         let (record, install, child) = if let Some((active, install)) = reuse {
-            cdp::apply_to_verified_targets(
-                &self.http,
-                active.port,
-                &active.browser_id,
-                &payload,
-            )
-            .await?;
+            cdp::apply_to_verified_targets(&self.http, active.port, &active.browser_id, &payload)
+                .await?;
             (
                 RuntimeRecord {
                     source_id: installed.source_id.clone(),
@@ -260,7 +248,11 @@ impl RuntimeManager {
             }
             inner.status.phase = "stopping".into();
             inner.status.message = "正在移除注入并关闭 CDP 会话".into();
-            (inner.record.clone(), inner.install.clone(), inner.child.take())
+            (
+                inner.record.clone(),
+                inner.install.clone(),
+                inner.child.take(),
+            )
         };
         let Some(record) = record else {
             let status = RuntimeStatus::stopped("当前没有运行中的皮肤会话");
@@ -286,12 +278,8 @@ impl RuntimeManager {
             return Ok(status);
         }
 
-        let _ = cdp::remove_from_verified_targets(
-            &self.http,
-            record.port,
-            &record.browser_id,
-        )
-        .await;
+        let _ =
+            cdp::remove_from_verified_targets(&self.http, record.port, &record.browser_id).await;
         if let Err(error) = install.stop(child.as_mut()) {
             let mut inner = self.inner.lock().await;
             inner.record = Some(record.clone());
@@ -326,7 +314,10 @@ impl RuntimeManager {
             inner.status = status_for_record(
                 "running",
                 &record,
-                format!("皮肤引擎运行中 · {} · 端口 {}", install.platform, record.port),
+                format!(
+                    "皮肤引擎运行中 · {} · 端口 {}",
+                    install.platform, record.port
+                ),
             );
             inner.record = Some(record.clone());
             inner.install = Some(install.clone());
@@ -488,9 +479,7 @@ async fn wait_until_ready(
                     ));
                 }
                 match cdp::verified_targets(http, port, &identity.id).await {
-                    Ok(targets) if !targets.is_empty() => {
-                        return Ok((identity.id, targets.len()))
-                    }
+                    Ok(targets) if !targets.is_empty() => return Ok((identity.id, targets.len())),
                     Ok(_) => last_error = "CDP 尚未出现 app:// 页面".into(),
                     Err(error) => last_error = error.to_string(),
                 }

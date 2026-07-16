@@ -56,9 +56,10 @@ impl CodexInstall {
     pub fn launch_normally(&self) -> AppResult<()> {
         #[cfg(target_os = "macos")]
         {
-            let bundle = self.bundle_path.as_ref().ok_or_else(|| {
-                AppError::Runtime("缺少已验证的 Codex 应用包路径".into())
-            })?;
+            let bundle = self
+                .bundle_path
+                .as_ref()
+                .ok_or_else(|| AppError::Runtime("缺少已验证的 Codex 应用包路径".into()))?;
             let status = Command::new("/usr/bin/open")
                 .arg("-na")
                 .arg(bundle)
@@ -398,7 +399,13 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
 } | ConvertTo-Json -Compress
 "#;
     let output = Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
         .output()?;
     if !output.status.success() {
         return Err(AppError::Runtime(
@@ -413,7 +420,10 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
     let normalized_executable = package.executable.replace('/', "\\");
     if !normalized_executable
         .to_ascii_lowercase()
-        .starts_with(&format!("{}\\", normalized_root.replace('/', "\\").to_ascii_lowercase()))
+        .starts_with(&format!(
+            "{}\\",
+            normalized_root.replace('/', "\\").to_ascii_lowercase()
+        ))
         || !executable.is_file()
     {
         return Err(AppError::Runtime("Codex Store 包路径校验失败".into()));
@@ -434,7 +444,13 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
 fn run_windows_identity_script(executable: &Path, script: &str) -> AppResult<bool> {
     let output = Command::new("powershell.exe")
         .env("LUMADROBE_CODEX_EXE", executable)
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
         .output()?;
     if !output.status.success() {
         return Err(AppError::Runtime(format!(

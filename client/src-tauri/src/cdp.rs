@@ -107,9 +107,7 @@ pub async fn apply_to_verified_targets(
     for target in targets {
         match evaluate_many(&target, port, &[&guarded_payload]).await {
             Ok(values) if probe_is_codex(values.first()) => applied += 1,
-            Ok(_) => {
-                last_error = Some("页面未通过 Codex DOM 标记校验".to_string())
-            }
+            Ok(_) => last_error = Some("页面未通过 Codex DOM 标记校验".to_string()),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
@@ -152,12 +150,19 @@ async fn fetch_json<T: DeserializeOwned>(
     response.json().await.map_err(AppError::Network)
 }
 
-async fn evaluate_many(target: &CdpTarget, port: u16, expressions: &[&str]) -> AppResult<Vec<Value>> {
+async fn evaluate_many(
+    target: &CdpTarget,
+    port: u16,
+    expressions: &[&str],
+) -> AppResult<Vec<Value>> {
     let url = validated_page_url(target, port)?;
-    let (mut stream, _) = timeout(Duration::from_secs(5), tokio_tungstenite::connect_async(url.as_str()))
-        .await
-        .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
-        .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
+    let (mut stream, _) = timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url.as_str()),
+    )
+    .await
+    .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
+    .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
 
     let mut values = Vec::with_capacity(expressions.len());
     for (index, expression) in expressions.iter().enumerate() {
@@ -238,7 +243,9 @@ fn valid_page_target(target: &CdpTarget, port: u16) -> bool {
 fn validated_page_url(target: &CdpTarget, port: u16) -> AppResult<Url> {
     let url = validated_debugger_url(&target.web_socket_debugger_url, port, "page")?;
     if url.path() != format!("/devtools/page/{}", target.id) {
-        return Err(AppError::Runtime("CDP 页面身份与 WebSocket 路径不一致".into()));
+        return Err(AppError::Runtime(
+            "CDP 页面身份与 WebSocket 路径不一致".into(),
+        ));
     }
     Ok(url)
 }
