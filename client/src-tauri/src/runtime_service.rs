@@ -240,6 +240,36 @@ impl RuntimeManager {
                     }
                 }
             }
+            if let Some(record) = previous_record.clone() {
+                match CodexInstall::saved_executable_is_running(
+                    &record.platform,
+                    &record.executable,
+                ) {
+                    Ok(true) => {
+                        return self
+                            .fail_apply_attempt(
+                                &installed,
+                                Some(record),
+                                previous_install.clone(),
+                                previous_child,
+                                "已保存路径对应的 Codex 仍在运行，但原 CDP 会话无法验证；为避免启动第二个会话，状态已保留，请先恢复或完全退出旧进程",
+                            )
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        return self
+                            .fail_apply_attempt(
+                                &installed,
+                                Some(record),
+                                previous_install.clone(),
+                                previous_child,
+                                format!("无法确认旧 Codex 进程是否仍在运行：{error}"),
+                            )
+                            .await;
+                    }
+                }
+            }
             let install = match CodexInstall::discover() {
                 Ok(install) => install,
                 Err(error) => {

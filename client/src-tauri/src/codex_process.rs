@@ -423,30 +423,37 @@ fn verify_macos_signature(bundle: &Path) -> AppResult<()> {
 
 #[cfg(target_os = "macos")]
 fn macos_codex_pids(executable: &Path) -> AppResult<Vec<u32>> {
-    let output = Command::new("/bin/ps")
-        .args(["-axo", "pid=,command="])
+    let output = Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-d", "txt", "-Fpn"])
         .output()?;
-    let expected = executable.to_string_lossy();
-    let pids = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim_start();
-            let split = trimmed.find(char::is_whitespace)?;
-            let pid = trimmed[..split].parse::<u32>().ok()?;
-            let command = trimmed[split..].trim_start();
-            macos_command_matches_executable(command, expected.as_ref()).then_some(pid)
-        })
-        .collect();
-    Ok(pids)
+    if !output.status.success() && output.stdout.is_empty() {
+        return Err(AppError::Runtime(
+            "无法读取 macOS 进程可执行文件映射".into(),
+        ));
+    }
+    Ok(parse_macos_text_pids(
+        &String::from_utf8_lossy(&output.stdout),
+        &executable.to_string_lossy(),
+    ))
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_command_matches_executable(command: &str, expected: &str) -> bool {
-    command == expected
-        || command
-            .strip_prefix(expected)
-            .and_then(|suffix| suffix.chars().next())
-            .is_some_and(char::is_whitespace)
+fn parse_macos_text_pids(output: &str, expected: &str) -> Vec<u32> {
+    let mut current_pid = None;
+    let mut pids = Vec::new();
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            current_pid = value.parse::<u32>().ok();
+        } else if let (Some(pid), Some(path)) = (current_pid, line.strip_prefix('n')) {
+            let path = path.strip_suffix(" (deleted)").unwrap_or(path);
+            if path == expected {
+                pids.push(pid);
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 #[cfg(target_os = "macos")]
@@ -481,8 +488,9 @@ fn verify_macos_listener_owner(executable: &Path, port: u16) -> AppResult<bool> 
     }
     listeners.sort_by_key(|(pid, _)| *pid);
     listeners.dedup_by_key(|(pid, _)| *pid);
+    let official_pids = macos_codex_pids(executable)?;
     for (pid, _) in listeners {
-        if !macos_pid_descends_from_executable(pid, executable)? {
+        if !macos_pid_descends_from_any(pid, &official_pids)? {
             return Ok(false);
         }
     }
@@ -496,24 +504,21 @@ fn macos_listener_is_loopback(address: &str, port: u16) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_pid_descends_from_executable(mut pid: u32, executable: &Path) -> AppResult<bool> {
-    let expected = executable.to_string_lossy();
+fn macos_pid_descends_from_any(mut pid: u32, expected_pids: &[u32]) -> AppResult<bool> {
     for _ in 0..32 {
         if pid <= 1 {
             return Ok(false);
         }
-        let output = Command::new("/bin/ps")
-            .args(["-p", &pid.to_string(), "-o", "ppid=,command="])
-            .output()?;
-        let line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let Some(split) = line.find(char::is_whitespace) else {
-            return Ok(false);
-        };
-        let parent = line[..split].trim().parse::<u32>().unwrap_or_default();
-        let command = line[split..].trim_start();
-        if macos_command_matches_executable(command, expected.as_ref()) {
+        if expected_pids.contains(&pid) {
             return Ok(true);
         }
+        let output = Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "ppid="])
+            .output()?;
+        let parent = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u32>()
+            .unwrap_or_default();
         if parent == 0 || parent == pid {
             return Ok(false);
         }
@@ -645,16 +650,11 @@ mod tests {
     }
 
     #[test]
-    fn macos_process_paths_require_an_argument_boundary() {
+    fn macos_text_vnodes_require_the_exact_executable_path() {
         let executable = "/Applications/Codex.app/Contents/MacOS/ChatGPT";
-        assert!(macos_command_matches_executable(executable, executable));
-        assert!(macos_command_matches_executable(
-            &format!("{executable} --remote-debugging-port=9341"),
-            executable
-        ));
-        assert!(!macos_command_matches_executable(
-            &format!("{executable}-spoof --remote-debugging-port=9341"),
-            executable
-        ));
+        let output = format!(
+            "p100\nftxt\nn{executable}\np101\nftxt\nn{executable}-spoof\np102\nftxt\nn{executable} (deleted)\n"
+        );
+        assert_eq!(parse_macos_text_pids(&output, executable), vec![100, 102]);
     }
 }
