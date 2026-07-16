@@ -1,0 +1,53 @@
+name: Client checks
+
+on:
+  pull_request:
+    branches: [release]
+    paths:
+      - "client/**"
+      - "dreamskin-source.json"
+      - "skins/**"
+      - "docs/client-goal.md"
+      - "docs/skin-source-spec-v1.md"
+      - ".github/workflows/client-checks.yml"
+  push:
+    branches: [release]
+    paths:
+      - "client/**"
+      - "dreamskin-source.json"
+      - "skins/**"
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install Tauri Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: cargo fmt --check
+      - run: cargo test

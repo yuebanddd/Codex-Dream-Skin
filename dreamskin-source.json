@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "codex-dream-skin-official",
+  "name": "Codex Dream Skin 示例源",
+  "author": "Codex Dream Skin contributors",
+  "description": "Codex Dream Skin 仓库内置的跨平台示例主题。",
+  "skins": [
+    {
+      "id": "portal-night",
+      "manifest": "skins/portal-night/skin.json"
+    },
+    {
+      "id": "pink-dream",
+      "manifest": "skins/pink-dream/skin.json"
+    }
+  ]
+}

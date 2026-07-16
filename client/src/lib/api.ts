@@ -1,0 +1,44 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { CatalogSkin, SourceRecord } from "../types";
+
+const demoSource: SourceRecord = {
+  id: "dream-skin-demo",
+  repositoryUrl: "https://github.com/yuebanddd/Codex-Dream-Skin",
+  owner: "yuebanddd",
+  repository: "Codex-Dream-Skin",
+  refName: "release",
+  name: "Codex Dream Skin 官方示例源",
+  author: "Codex Dream Skin contributors",
+  description: "启动桌面端后即可刷新 GitHub 仓库中的真实皮肤目录。",
+  refreshedAt: new Date().toISOString(),
+  skins: [],
+};
+
+function inTauri(): boolean {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+export async function listSources(): Promise<SourceRecord[]> {
+  if (!inTauri()) return [demoSource];
+  return invoke<SourceRecord[]>("list_sources");
+}
+
+export async function addSource(repositoryUrl: string): Promise<SourceRecord> {
+  if (!inTauri()) {
+    throw new Error("Web 预览模式无法访问本机 Rust 服务，请使用 Tauri 桌面端。 ");
+  }
+  return invoke<SourceRecord>("add_source", { repositoryUrl });
+}
+
+export async function refreshSource(sourceId: string): Promise<SourceRecord> {
+  return invoke<SourceRecord>("refresh_source", { sourceId });
+}
+
+export async function removeSource(sourceId: string): Promise<void> {
+  return invoke("remove_source", { sourceId });
+}
+
+export async function listCatalogSkins(): Promise<CatalogSkin[]> {
+  if (!inTauri()) return [];
+  return invoke<CatalogSkin[]>("list_catalog_skins");
+}

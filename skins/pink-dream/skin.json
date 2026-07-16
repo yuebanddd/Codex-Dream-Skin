@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "pink-dream",
+  "name": "Pink Dream / 粉色梦境",
+  "version": "1.0.0",
+  "description": "粉紫色轻盈主题，保留 Codex 原生控件和交互。",
+  "author": "Codex Dream Skin contributors",
+  "engineVersion": ">=0.1.0",
+  "platforms": ["windows"],
+  "preview": "docs/images/gallery/skin-01.jpg",
+  "background": "windows/assets/dream-reference.png",
+  "css": "windows/assets/dream-skin.css",
+  "colors": {
+    "accent": "#ff73bd",
+    "secondary": "#b45cff",
+    "highlight": "#8b3dce"
+  }
+}
