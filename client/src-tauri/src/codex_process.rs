@@ -1,8 +1,13 @@
 use crate::error::{AppError, AppResult};
+#[cfg(target_os = "windows")]
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "macos")]
 use std::thread;
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
 const EXPECTED_MAC_TEAM_ID: &str = "2DC432GLL2";
