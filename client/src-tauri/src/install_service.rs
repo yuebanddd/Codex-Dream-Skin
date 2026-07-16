@@ -148,11 +148,17 @@ async fn download(client: &Client, url: &str, limit: usize) -> AppResult<Vec<u8>
         .and_then(|value| value.parse::<usize>().ok())
         .is_some_and(|length| length > limit)
     {
-        return Err(AppError::UnsafeAsset(format!("资源超过 {} MiB", limit / 1024 / 1024)));
+        return Err(AppError::UnsafeAsset(format!(
+            "资源超过 {} MiB",
+            limit / 1024 / 1024
+        )));
     }
     let bytes = response.bytes().await?;
     if bytes.len() > limit {
-        return Err(AppError::UnsafeAsset(format!("资源超过 {} MiB", limit / 1024 / 1024)));
+        return Err(AppError::UnsafeAsset(format!(
+            "资源超过 {} MiB",
+            limit / 1024 / 1024
+        )));
     }
     Ok(bytes.to_vec())
 }
@@ -168,7 +174,9 @@ fn image_extension(bytes: &[u8], label: &str) -> AppResult<&'static str> {
     } else if webp {
         Ok("webp")
     } else {
-        Err(AppError::UnsafeAsset(format!("{label} 仅支持 PNG、JPEG 或 WebP")))
+        Err(AppError::UnsafeAsset(format!(
+            "{label} 仅支持 PNG、JPEG 或 WebP"
+        )))
     }
 }
 
@@ -185,7 +193,9 @@ fn validate_css(css: &str) -> AppResult<()> {
         "-moz-binding",
     ];
     if let Some(token) = blocked.iter().find(|token| normalized.contains(**token)) {
-        return Err(AppError::UnsafeAsset(format!("CSS 包含被禁止的内容：{token}")));
+        return Err(AppError::UnsafeAsset(format!(
+            "CSS 包含被禁止的内容：{token}"
+        )));
     }
     Ok(())
 }
@@ -228,7 +238,10 @@ mod tests {
 
     #[test]
     fn recognizes_supported_image_signatures() {
-        assert_eq!(image_extension(b"\x89PNG\r\n\x1a\nrest", "test").unwrap(), "png");
+        assert_eq!(
+            image_extension(b"\x89PNG\r\n\x1a\nrest", "test").unwrap(),
+            "png"
+        );
         assert!(image_extension(b"<svg onload='alert(1)'>", "test").is_err());
     }
 
