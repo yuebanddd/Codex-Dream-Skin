@@ -11,6 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const EXPECTED_MAC_TEAM_ID: &str = "2DC432GLL2";
+#[cfg(target_os = "macos")]
+const LEGACY_MACOS_JOB_LABEL: &str = "com.openai.codex-dream-skin-studio.app";
 
 #[derive(Debug, Clone)]
 pub struct CodexInstall {
@@ -48,6 +50,8 @@ impl CodexInstall {
     }
 
     pub fn launch_with_cdp(&self, port: u16) -> AppResult<Child> {
+        #[cfg(target_os = "macos")]
+        clear_legacy_macos_jobs();
         Command::new(&self.executable)
             .arg("--remote-debugging-address=127.0.0.1")
             .arg(format!("--remote-debugging-port={port}"))
@@ -61,6 +65,7 @@ impl CodexInstall {
     pub fn launch_normally(&self) -> AppResult<()> {
         #[cfg(target_os = "macos")]
         {
+            clear_legacy_macos_jobs();
             let bundle = self
                 .bundle_path
                 .as_ref()
@@ -117,6 +122,41 @@ if (@($running).Count -gt 0) { 'true' } else { 'false' }
         }
     }
 
+    pub fn saved_executable_is_running(platform: &str, executable: &str) -> AppResult<bool> {
+        #[cfg(target_os = "macos")]
+        {
+            if platform != "macos" {
+                return Ok(false);
+            }
+            Ok(!macos_codex_pids(Path::new(executable))?.is_empty())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if platform != "windows" {
+                return Ok(false);
+            }
+            run_windows_identity_script(
+                Path::new(executable),
+                r#"
+$expected = [IO.Path]::GetFullPath($env:LUMADROBE_CODEX_EXE)
+$running = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+  $path = $_.ExecutablePath
+  if (-not $path) {
+    try { $path = (Get-Process -Id $_.ProcessId -ErrorAction Stop).Path } catch { $path = $null }
+  }
+  $path -and ([IO.Path]::GetFullPath($path) -ieq $expected)
+}
+if (@($running).Count -gt 0) { 'true' } else { 'false' }
+"#,
+            )
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (platform, executable);
+            Ok(false)
+        }
+    }
+
     pub fn verify_listener_owner(&self, port: u16) -> AppResult<bool> {
         #[cfg(target_os = "macos")]
         {
@@ -160,6 +200,7 @@ foreach ($listener in $listeners) {{
     pub fn stop(&self, mut launched_child: Option<&mut Child>) -> AppResult<()> {
         #[cfg(target_os = "macos")]
         {
+            clear_legacy_macos_jobs();
             let _ = Command::new("/usr/bin/osascript")
                 .args(["-e", "tell application id \"com.openai.codex\" to quit"])
                 .status();
@@ -243,6 +284,29 @@ foreach ($item in $alive) {
             current == saved
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_legacy_macos_jobs() {
+    let remove = |label: &str| {
+        let _ = Command::new("/bin/launchctl")
+            .args(["remove", label])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    };
+    let uid = Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|uid| !uid.is_empty());
+    if let Some(uid) = uid {
+        remove(&format!("gui/{uid}/{LEGACY_MACOS_JOB_LABEL}"));
+    }
+    remove(LEGACY_MACOS_JOB_LABEL);
 }
 
 #[cfg(target_os = "macos")]
@@ -370,10 +434,19 @@ fn macos_codex_pids(executable: &Path) -> AppResult<Vec<u32>> {
             let split = trimmed.find(char::is_whitespace)?;
             let pid = trimmed[..split].parse::<u32>().ok()?;
             let command = trimmed[split..].trim_start();
-            command.starts_with(expected.as_ref()).then_some(pid)
+            macos_command_matches_executable(command, expected.as_ref()).then_some(pid)
         })
         .collect();
     Ok(pids)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_command_matches_executable(command: &str, expected: &str) -> bool {
+    command == expected
+        || command
+            .strip_prefix(expected)
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(char::is_whitespace)
 }
 
 #[cfg(target_os = "macos")]
@@ -438,7 +511,7 @@ fn macos_pid_descends_from_executable(mut pid: u32, executable: &Path) -> AppRes
         };
         let parent = line[..split].trim().parse::<u32>().unwrap_or_default();
         let command = line[split..].trim_start();
-        if command.starts_with(expected.as_ref()) {
+        if macos_command_matches_executable(command, expected.as_ref()) {
             return Ok(true);
         }
         if parent == 0 || parent == pid {
@@ -569,5 +642,19 @@ mod tests {
         assert!(!macos_listener_is_loopback("*:9341", 9341));
         assert!(!macos_listener_is_loopback("0.0.0.0:9341", 9341));
         assert!(!macos_listener_is_loopback("127.0.0.1:9342", 9341));
+    }
+
+    #[test]
+    fn macos_process_paths_require_an_argument_boundary() {
+        let executable = "/Applications/Codex.app/Contents/MacOS/ChatGPT";
+        assert!(macos_command_matches_executable(executable, executable));
+        assert!(macos_command_matches_executable(
+            &format!("{executable} --remote-debugging-port=9341"),
+            executable
+        ));
+        assert!(!macos_command_matches_executable(
+            &format!("{executable}-spoof --remote-debugging-port=9341"),
+            executable
+        ));
     }
 }

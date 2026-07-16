@@ -396,9 +396,22 @@ impl RuntimeManager {
                 }
             },
         };
-        let verified = validate_saved_install(&install, &record).is_ok()
-            && verify_endpoint(&self.http, &install, &record).await.is_ok();
+        let install_matches_saved = validate_saved_install(&install, &record).is_ok();
+        let verified =
+            install_matches_saved && verify_endpoint(&self.http, &install, &record).await.is_ok();
         if !verified {
+            let saved_process_running =
+                CodexInstall::saved_executable_is_running(&record.platform, &record.executable);
+            if saved_process_running.unwrap_or(true) {
+                return self
+                    .fail_recoverable_session(
+                        record,
+                        install_matches_saved.then_some(install),
+                        child,
+                        "已保存的 Codex 会话暂时无法验证，但旧进程仍可能运行；状态已保留，请完全退出该进程后重试恢复",
+                    )
+                    .await;
+            }
             if let Err(error) = self.persist(None) {
                 return self
                     .fail_recoverable_session(
