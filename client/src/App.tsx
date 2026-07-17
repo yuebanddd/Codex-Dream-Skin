@@ -1070,6 +1070,10 @@ function DiagnosticsView({
               <span>可执行文件</span>
               <code>{diagnostics.executable ?? "未发现"}</code>
             </div>
+            <div className="diagnostics-path">
+              <span>运行日志</span>
+              <code>{diagnostics.logPath}</code>
+            </div>
           </section>
           <div className="diagnostics-notes">
             <strong>{diagnostics.runtime.message}</strong>
@@ -1080,7 +1084,8 @@ function DiagnosticsView({
               检查时间：{new Date(diagnostics.generatedAt).toLocaleString()}
             </small>
             <small>
-              导出文件会包含本机可执行文件路径，请在公开分享前检查内容。
+              导出文件和运行日志会包含本机路径、主题标识与 CDP
+              目标标识，请在公开分享前检查内容。
             </small>
             {exportPath && <code>已导出：{exportPath}</code>}
           </div>

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — 2026-07-17
+
+- Windows 渲染页在每次连接后先启用 Runtime 与 Page 域，再在同一 CDP 会话内完成 DOM 校验与主题注入
+- Windows 启动 Codex 与内部系统检查统一使用隐藏进程，不再弹出 PowerShell/控制台黑窗
+- `Runtime.evaluate` 使用独立 30 秒时限，错误包含命令、目标 ID 与载荷大小
+- 新增 1 MiB 滚动 JSONL 运行日志，Unix 权限固定为 `0600`，诊断页直接展示日志路径
+- PR 阶段汇总并复验三个平台的发布资产，合并到 `release` 后才自动创建唯一版本号的 Pre-release
+- GitHub Actions 不使用 npm 依赖缓存
+- 版本升级至 0.5.1
+
 ## 0.5.0 — 2026-07-17
 
 - 新增 macOS arm64/x64 DMG 与 Windows x64 NSIS 测试安装包工作流

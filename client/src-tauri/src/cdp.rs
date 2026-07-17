@@ -5,9 +5,15 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::net::TcpStream;
+use tokio::time::{timeout, timeout_at, Instant};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PROBE_EXPRESSION: &str = r#"(() => {
   const markers = {
@@ -52,6 +58,116 @@ pub struct BrowserIdentity {
 #[serde(rename_all = "camelCase")]
 struct VersionResponse {
     web_socket_debugger_url: String,
+}
+
+type PageSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+struct CdpSession {
+    target_id: String,
+    stream: PageSocket,
+    next_id: u64,
+}
+
+impl CdpSession {
+    async fn connect(target: &CdpTarget, port: u16) -> AppResult<Self> {
+        let url = validated_page_url(target, port)?;
+        let (stream, _) = timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
+        .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
+        let mut session = Self {
+            target_id: target.id.clone(),
+            stream,
+            next_id: 1,
+        };
+        session
+            .command("Runtime.enable", json!({}), COMMAND_TIMEOUT)
+            .await?;
+        session
+            .command("Page.enable", json!({}), COMMAND_TIMEOUT)
+            .await?;
+        Ok(session)
+    }
+
+    async fn evaluate(&mut self, expression: &str) -> AppResult<Value> {
+        let result = self
+            .command(
+                "Runtime.evaluate",
+                json!({
+                    "expression": expression,
+                    "awaitPromise": true,
+                    "returnByValue": true,
+                    "userGesture": false,
+                }),
+                EVALUATE_TIMEOUT,
+            )
+            .await?;
+        if let Some(exception) = result.get("exceptionDetails") {
+            return Err(AppError::Runtime(format!("渲染器执行失败：{exception}")));
+        }
+        Ok(result
+            .pointer("/result/value")
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    async fn command(&mut self, method: &str, params: Value, wait: Duration) -> AppResult<Value> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let request = json!({ "id": id, "method": method, "params": params }).to_string();
+        let request_bytes = request.len();
+        let deadline = Instant::now() + wait;
+        timeout_at(deadline, self.stream.send(Message::Text(request.into())))
+            .await
+            .map_err(|_| {
+                AppError::Runtime(format!(
+                    "CDP 命令发送超时：{method}，目标 {}，载荷 {request_bytes} bytes",
+                    self.target_id
+                ))
+            })?
+            .map_err(|error| AppError::Runtime(format!("发送 CDP 命令失败：{error}")))?;
+
+        let response = loop {
+            let next = timeout_at(deadline, self.stream.next())
+                .await
+                .map_err(|_| {
+                    AppError::Runtime(format!(
+                        "CDP 命令等待超时：{method}，目标 {}，载荷 {request_bytes} bytes",
+                        self.target_id
+                    ))
+                })?;
+            let message = next
+                .ok_or_else(|| AppError::Runtime("CDP WebSocket 已关闭".into()))?
+                .map_err(|error| AppError::Runtime(format!("CDP WebSocket 错误：{error}")))?;
+            let text = match message {
+                Message::Text(text) => text,
+                Message::Close(_) => {
+                    return Err(AppError::Runtime("CDP WebSocket 提前关闭".into()))
+                }
+                _ => continue,
+            };
+            let parsed: Value = serde_json::from_str(text.as_str())?;
+            if parsed.get("id").and_then(Value::as_u64) == Some(id) {
+                break parsed;
+            }
+        };
+        if let Some(error) = response.get("error") {
+            return Err(AppError::Runtime(format!(
+                "CDP 命令被拒绝：{method}：{error}"
+            )));
+        }
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| AppError::Runtime(format!("CDP 响应缺少 result：{method}")))
+    }
+
+    async fn close(mut self) {
+        let _ = self.stream.close(None).await;
+    }
 }
 
 pub fn build_client() -> AppResult<Client> {
@@ -215,68 +331,12 @@ async fn evaluate_many(
     port: u16,
     expressions: &[&str],
 ) -> AppResult<Vec<Value>> {
-    let url = validated_page_url(target, port)?;
-    let (mut stream, _) = timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url.as_str()),
-    )
-    .await
-    .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
-    .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
-
+    let mut session = CdpSession::connect(target, port).await?;
     let mut values = Vec::with_capacity(expressions.len());
-    for (index, expression) in expressions.iter().enumerate() {
-        let id = (index + 1) as u64;
-        let request = json!({
-            "id": id,
-            "method": "Runtime.evaluate",
-            "params": {
-                "expression": expression,
-                "awaitPromise": true,
-                "returnByValue": true,
-                "userGesture": false,
-            }
-        });
-        stream
-            .send(Message::Text(request.to_string().into()))
-            .await
-            .map_err(|error| AppError::Runtime(format!("发送 CDP 命令失败：{error}")))?;
-        let response = loop {
-            let next = timeout(Duration::from_secs(10), stream.next())
-                .await
-                .map_err(|_| AppError::Runtime("CDP 命令等待超时".into()))?;
-            let message = next
-                .ok_or_else(|| AppError::Runtime("CDP WebSocket 已关闭".into()))?
-                .map_err(|error| AppError::Runtime(format!("CDP WebSocket 错误：{error}")))?;
-            let text = match message {
-                Message::Text(text) => text,
-                Message::Close(_) => {
-                    return Err(AppError::Runtime("CDP WebSocket 提前关闭".into()))
-                }
-                _ => continue,
-            };
-            let parsed: Value = serde_json::from_str(text.as_str())?;
-            if parsed.get("id").and_then(Value::as_u64) == Some(id) {
-                break parsed;
-            }
-        };
-        if let Some(error) = response.get("error") {
-            return Err(AppError::Runtime(format!("CDP 命令被拒绝：{error}")));
-        }
-        let result = response
-            .get("result")
-            .ok_or_else(|| AppError::Runtime("CDP 响应缺少 result".into()))?;
-        if let Some(exception) = result.get("exceptionDetails") {
-            return Err(AppError::Runtime(format!("渲染器执行失败：{exception}")));
-        }
-        values.push(
-            result
-                .pointer("/result/value")
-                .cloned()
-                .unwrap_or(Value::Null),
-        );
+    for expression in expressions {
+        values.push(session.evaluate(expression).await?);
     }
-    let _ = stream.close(None).await;
+    session.close().await;
     Ok(values)
 }
 

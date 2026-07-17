@@ -1,6 +1,8 @@
 use crate::error::{AppError, AppResult};
 #[cfg(target_os = "windows")]
 use serde::Deserialize;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::path::Path;
 use std::path::PathBuf;
@@ -11,6 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const EXPECTED_MAC_TEAM_ID: &str = "2DC432GLL2";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(target_os = "macos")]
 const LEGACY_MACOS_JOB_LABEL: &str = "com.openai.codex-dream-skin-studio.app";
 
@@ -52,14 +56,15 @@ impl CodexInstall {
     pub fn launch_with_cdp(&self, port: u16) -> AppResult<Child> {
         #[cfg(target_os = "macos")]
         clear_legacy_macos_jobs();
-        Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        suppress_windows_console(&mut command);
+        command
             .arg("--remote-debugging-address=127.0.0.1")
             .arg(format!("--remote-debugging-port={port}"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(AppError::Io)
+            .stderr(Stdio::null());
+        command.spawn().map_err(AppError::Io)
     }
 
     pub fn launch_normally(&self) -> AppResult<()> {
@@ -81,11 +86,13 @@ impl CodexInstall {
         }
         #[cfg(target_os = "windows")]
         {
-            Command::new(&self.executable)
+            let mut command = Command::new(&self.executable);
+            suppress_windows_console(&mut command);
+            command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
+                .stderr(Stdio::null());
+            command.spawn()?;
             Ok(())
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -556,11 +563,15 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
   packageFamilyName = "$($package.PackageFamilyName)"
 } | ConvertTo-Json -Compress
 "#;
-    let output = Command::new("powershell.exe")
+    let mut command = Command::new("powershell.exe");
+    suppress_windows_console(&mut command);
+    let output = command
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             script,
         ])
@@ -600,12 +611,16 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
 
 #[cfg(target_os = "windows")]
 fn run_windows_identity_script(executable: &Path, script: &str) -> AppResult<bool> {
-    let output = Command::new("powershell.exe")
+    let mut command = Command::new("powershell.exe");
+    suppress_windows_console(&mut command);
+    let output = command
         .env("LUMADROBE_CODEX_EXE", executable)
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             script,
         ])
@@ -617,6 +632,13 @@ fn run_windows_identity_script(executable: &Path, script: &str) -> AppResult<boo
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+fn suppress_windows_console(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(not(target_os = "windows"))]
+    let _ = command;
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ LumaDrobe Desktop（React + Rust）
 - 恢复操作在重新验证应用、监听者与浏览器 ID 后才关闭并重启 Codex
 - 暂停操作先持久化暂停意图并等待重注入 watcher 退出，再从已验证页面移除主题
 - 运行诊断只执行身份、进程与 CDP 只读检查，不修改 Codex 或主题状态
+- Windows 的系统身份检查由客户端内部执行，辅助进程使用无控制台窗口模式，不依赖外置脚本
 - 不修改官方应用包、`app.asar`、代码签名、API Key、Base URL 或 `~/.codex/config.toml`
 
 ## 路径速查
@@ -37,6 +38,7 @@ LumaDrobe Desktop（React + Rust）
 | 订阅缓存       | `sources.json`                                      | `sources.json`                   |
 | 本地主题库     | `installed-skins.json`                              | `installed-skins.json`           |
 | 活动会话       | `runtime.json`                                      | `runtime.json`                   |
+| 运行日志       | `logs/runtime.jsonl`                                | `logs/runtime.jsonl`             |
 | 首选 CDP 端口  | `9341`                                              | `9335`                           |
 
 实际应用数据根目录由 Tauri `app_data_dir` 解析；表中路径用于说明平台位置，不应由业务代码手工拼接。

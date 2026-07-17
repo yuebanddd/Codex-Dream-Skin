@@ -8,6 +8,7 @@ mod install_service;
 mod installed_store;
 mod models;
 mod renderer_payload;
+mod runtime_log;
 mod runtime_service;
 mod source_store;
 
@@ -39,7 +40,7 @@ pub fn run() {
                 data_dir.join("installed-skins.json"),
             )?));
             let http = Client::builder()
-                .user_agent("LumaDrobe/0.5.0")
+                .user_agent("LumaDrobe/0.5.1")
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::limited(3))
                 .build()?;

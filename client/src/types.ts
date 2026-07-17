@@ -73,6 +73,7 @@ export interface RuntimeStatus {
 
 export interface RuntimeDiagnostics {
   generatedAt: string;
+  logPath: string;
   clientVersion: string;
   buildCommit: string;
   platform: string;
