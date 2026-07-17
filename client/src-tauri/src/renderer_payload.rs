@@ -92,26 +92,35 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
 
   const readAppearancePreference = () => {{
     const root = document.documentElement;
-    const classes = `${{root?.className || ""}} ${{document.body?.className || ""}}`.toLowerCase();
-    if (/\b(dark|theme-dark|appearance-dark)\b/.test(classes)) return "dark";
-    if (/\b(light|theme-light|appearance-light)\b/.test(classes)) return "light";
-    const declared = (root?.getAttribute("data-theme") ||
-      root?.getAttribute("data-appearance") ||
-      root?.getAttribute("data-color-mode") ||
-      document.body?.getAttribute("data-theme") ||
-      document.body?.getAttribute("data-appearance") ||
-      document.body?.getAttribute("data-color-mode") || "").toLowerCase();
-    if (declared.includes("dark")) return "dark";
-    if (declared.includes("light")) return "light";
-    if (declared.includes("system")) return "system";
+    const classify = (value) => {{
+      const normalized = String(value || "").toLowerCase();
+      if (/\b(dark|theme-dark|appearance-dark)\b/.test(normalized)) return "dark";
+      if (/\b(light|theme-light|appearance-light)\b/.test(normalized)) return "light";
+      if (/\b(system|auto)\b/.test(normalized)) return "system";
+      return null;
+    }};
     const checked = document.querySelector('input[name="appearance-theme"]:checked');
-    const choice = `${{checked?.getAttribute("aria-label") || ""}} ${{
+    const checkedChoice = `${{checked?.getAttribute("aria-label") || ""}} ${{
       checked?.getAttribute("value") || ""
-    }}`.toLowerCase();
-    if (choice.includes("dark") || choice.includes("暗")) return "dark";
-    if (choice.includes("light") || choice.includes("浅")) return "light";
-    if (choice.includes("system") || choice.includes("系统")) return "system";
-    return null;
+    }}`;
+    if (checkedChoice.includes("暗")) return "dark";
+    if (checkedChoice.includes("浅")) return "light";
+    if (checkedChoice.includes("系统")) return "system";
+    const checkedPreference = classify(checkedChoice);
+    if (checkedPreference) return checkedPreference;
+    const body = document.body;
+    const candidates = [
+      classify(body?.getAttribute("data-theme")),
+      classify(body?.getAttribute("data-appearance")),
+      classify(body?.getAttribute("data-color-mode")),
+      classify(body?.className),
+      classify(root?.getAttribute("data-theme")),
+      classify(root?.getAttribute("data-appearance")),
+      classify(root?.getAttribute("data-color-mode")),
+      classify(root?.className),
+    ];
+    return candidates.find((value) => value === "dark" || value === "light") ||
+      (candidates.includes("system") ? "system" : null);
   }};
 
   let mediaQuery = null;
@@ -377,6 +386,9 @@ mod tests {
         assert!(payload.contains("root.setAttribute(\"data-dream-shell\", refreshShellMode())"));
         assert!(payload.contains("mediaQuery.addEventListener(\"change\", mediaHandler)"));
         assert!(payload.contains("document.body?.getAttribute(\"data-theme\")"));
+        assert!(payload.contains(
+            "candidates.find((value) => value === \"dark\" || value === \"light\")"
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
