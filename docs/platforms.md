@@ -14,7 +14,7 @@ LumaDrobe Desktop（React + Rust）
 
 订阅仓库只能提供声明式清单、PNG/JPEG/WebP 和通过静态检查的 CSS。Renderer JavaScript 适配器随 LumaDrobe 发布，不从 Git 仓库下载。
 
-## LumaDrobe v0.3 安全边界
+## LumaDrobe v0.4 安全边界
 
 - CDP 固定绑定 `127.0.0.1`，仅从平台首选端口后的 100 个端口中选择空闲端口
 - 每次注入前验证监听进程属于已验证的官方 Codex
@@ -24,6 +24,8 @@ LumaDrobe Desktop（React + Rust）
 - WebSocket 只接受同端口 loopback 地址和 `/devtools/page/<target-id>` 形状
 - 目标必须同时是 `app://` 页面并通过 Codex shell DOM 标记检查
 - 恢复操作在重新验证应用、监听者与浏览器 ID 后才关闭并重启 Codex
+- 暂停操作先持久化暂停意图并等待重注入 watcher 退出，再从已验证页面移除主题
+- 运行诊断只执行身份、进程与 CDP 只读检查，不修改 Codex 或主题状态
 - 不修改官方应用包、`app.asar`、代码签名、API Key、Base URL 或 `~/.codex/config.toml`
 
 ## 路径速查
@@ -47,6 +49,8 @@ LumaDrobe Desktop（React + Rust）
 | Rust CDP 启动与注入 | ✅ | ✅ |
 | 会话内热切换 | ✅ | ✅ |
 | Renderer 重载自动重注入 | ✅ | ✅ |
+| 无重启暂停与恢复 | ✅ | ✅ |
+| 只读运行诊断 | ✅ | ✅ |
 | 恢复原生并重启 | ✅ | ✅ |
 | Git 仓库订阅与本地安装 | ✅ | ✅ |
 | 实机兼容性矩阵 | 待验收 | 待验收 |

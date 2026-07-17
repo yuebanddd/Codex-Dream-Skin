@@ -2,7 +2,7 @@ use crate::github_source::fetch_source;
 use crate::install_service::{
     install_skin as install_theme, installed_versions_share_directory, remove_installed_skin,
 };
-use crate::models::{CatalogSkin, InstalledSkin, RuntimeStatus, SourceRecord};
+use crate::models::{CatalogSkin, InstalledSkin, RuntimeDiagnostics, RuntimeStatus, SourceRecord};
 use crate::AppState;
 use tauri::State;
 
@@ -174,6 +174,11 @@ pub async fn runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus,
 }
 
 #[tauri::command]
+pub async fn runtime_diagnostics(state: State<'_, AppState>) -> Result<RuntimeDiagnostics, String> {
+    Ok(state.runtime.diagnostics().await)
+}
+
+#[tauri::command]
 pub async fn apply_and_launch(
     source_id: String,
     skin_id: String,
@@ -199,6 +204,26 @@ pub async fn restore_native(state: State<'_, AppState>) -> Result<RuntimeStatus,
     state
         .runtime
         .restore()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn pause_theme(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+    let _operation = state.theme_operation.lock().await;
+    state
+        .runtime
+        .pause()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn resume_theme(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+    let _operation = state.theme_operation.lock().await;
+    state
+        .runtime
+        .resume()
         .await
         .map_err(|error| error.to_string())
 }

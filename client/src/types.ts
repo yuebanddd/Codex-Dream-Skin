@@ -55,10 +55,37 @@ export interface InstalledSkin {
 }
 
 export interface RuntimeStatus {
-  phase: "stopped" | "checking" | "starting" | "running" | "stopping" | "error";
+  phase:
+    | "stopped"
+    | "checking"
+    | "starting"
+    | "running"
+    | "pausing"
+    | "paused"
+    | "stopping"
+    | "error";
   activeSourceId?: string;
   activeSkinId?: string;
   activeVersion?: string;
   port?: number;
   message: string;
+}
+
+export interface RuntimeDiagnostics {
+  generatedAt: string;
+  clientVersion: string;
+  platform: string;
+  architecture: string;
+  runtime: RuntimeStatus;
+  savedSession: boolean;
+  paused: boolean;
+  codexFound: boolean;
+  codexVersion?: string;
+  codexIdentity?: string;
+  executable?: string;
+  codexRunning?: boolean;
+  listenerVerified?: boolean;
+  endpointVerified?: boolean;
+  verifiedTargets?: number;
+  notes: string[];
 }

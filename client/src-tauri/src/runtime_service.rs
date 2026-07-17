@@ -3,8 +3,9 @@ use crate::cdp;
 use crate::codex_process::CodexInstall;
 use crate::error::{AppError, AppResult};
 use crate::installed_store::InstalledStore;
-use crate::models::{InstalledSkin, RuntimeStatus};
+use crate::models::{InstalledSkin, RuntimeDiagnostics, RuntimeStatus};
 use crate::renderer_payload::build_payload;
+use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::async_runtime::JoinHandle;
 use tokio::sync::{watch, Mutex};
 use tokio::time::{interval, sleep, Instant};
 
@@ -29,6 +31,8 @@ struct RuntimeRecord {
     platform: String,
     executable: String,
     codex_identity: String,
+    #[serde(default)]
+    paused: bool,
 }
 
 struct RuntimeInner {
@@ -37,6 +41,8 @@ struct RuntimeInner {
     install: Option<CodexInstall>,
     child: Option<Child>,
     cancel: Option<watch::Sender<bool>>,
+    watcher: Option<JoinHandle<()>>,
+    payload: Option<String>,
     generation: u64,
 }
 
@@ -70,6 +76,8 @@ impl RuntimeManager {
                 install: None,
                 child: None,
                 cancel: None,
+                watcher: None,
+                payload: None,
                 generation: 0,
             }),
         }))
@@ -87,7 +95,7 @@ impl RuntimeManager {
             .is_some_and(|record| record.source_id == source_id && record.skin_id == skin_id)
             && matches!(
                 inner.status.phase.as_str(),
-                "running" | "checking" | "error"
+                "running" | "paused" | "pausing" | "checking" | "error"
             )
     }
 
@@ -133,6 +141,19 @@ impl RuntimeManager {
             .filter(|skin| skin.version == record.version)
             .ok_or_else(|| AppError::Runtime("上次应用的主题版本已不在本地主题库".into()))?;
         let payload = build_payload(&installed)?;
+        if record.paused {
+            cdp::remove_from_verified_targets(&self.http, record.port, &record.browser_id).await?;
+            let mut inner = self.inner.lock().await;
+            inner.record = Some(record.clone());
+            inner.install = Some(install);
+            inner.payload = Some(payload);
+            inner.status = status_for_record(
+                "paused",
+                record,
+                "皮肤已暂停 · Codex 与回环 CDP 会话保持运行",
+            );
+            return Ok(());
+        }
         cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
             .await?;
         self.start_watcher(record.clone(), install, None, payload)
@@ -154,11 +175,9 @@ impl RuntimeManager {
             };
         }
 
+        self.stop_watcher().await;
         let (previous_record, previous_install, mut previous_child) = {
             let mut inner = self.inner.lock().await;
-            if let Some(cancel) = inner.cancel.take() {
-                let _ = cancel.send(true);
-            }
             (
                 inner.record.clone(),
                 inner.install.clone(),
@@ -224,6 +243,7 @@ impl RuntimeManager {
                     source_id: installed.source_id.clone(),
                     skin_id: installed.skin_id.clone(),
                     version: installed.version.clone(),
+                    paused: false,
                     ..active
                 },
                 install,
@@ -360,6 +380,7 @@ impl RuntimeManager {
                 platform: install.platform.clone(),
                 executable: install.executable.to_string_lossy().into_owned(),
                 codex_identity: install.identity.clone(),
+                paused: false,
             };
             let ready = wait_until_ready(&self.http, &install, port).await;
             let (browser_id, _) = match ready {
@@ -401,12 +422,218 @@ impl RuntimeManager {
         Ok(self.status().await)
     }
 
+    pub async fn pause(self: &Arc<Self>) -> AppResult<RuntimeStatus> {
+        let (record, install, payload) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.record.clone(),
+                inner.install.clone(),
+                inner.payload.clone(),
+            )
+        };
+        let Some(record) = record else {
+            return Err(AppError::Runtime("当前没有可暂停的皮肤会话".into()));
+        };
+        if record.paused {
+            return Ok(self.status().await);
+        }
+        if pending_launch(&record) {
+            return Err(AppError::Runtime(
+                "Codex CDP 启动尚未完成，请先恢复原生".into(),
+            ));
+        }
+        let payload = payload.ok_or_else(|| AppError::Runtime("活动主题载荷不可用".into()))?;
+        let install = match install {
+            Some(install) => install,
+            None => CodexInstall::discover()?,
+        };
+        validate_saved_install(&install, &record)?;
+        verify_endpoint(&self.http, &install, &record).await?;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.status = status_for_record("pausing", &record, "正在停止重注入并移除主题");
+        }
+        self.stop_watcher().await;
+        let child = self.inner.lock().await.child.take();
+        let mut paused_record = record.clone();
+        paused_record.paused = true;
+        if let Err(error) = self.persist(Some(&paused_record)) {
+            self.start_watcher(record, install, child, payload).await;
+            return Err(AppError::Runtime(format!("暂停状态无法保存：{error}")));
+        }
+        if let Err(remove_error) = cdp::remove_from_verified_targets(
+            &self.http,
+            paused_record.port,
+            &paused_record.browser_id,
+        )
+        .await
+        {
+            if let Err(rollback_error) = self.persist(Some(&record)) {
+                let message =
+                    format!("主题移除失败：{remove_error}；活动状态也无法回滚：{rollback_error}");
+                let mut inner = self.inner.lock().await;
+                inner.record = Some(paused_record.clone());
+                inner.install = Some(install);
+                inner.child = child;
+                inner.payload = Some(payload);
+                inner.status = status_for_record("error", &paused_record, &message);
+                return Err(AppError::Runtime(message));
+            }
+            self.start_watcher(record, install, child, payload).await;
+            return Err(AppError::Runtime(format!("无法暂停皮肤：{remove_error}")));
+        }
+        let status = status_for_record(
+            "paused",
+            &paused_record,
+            "皮肤已暂停 · Codex 与回环 CDP 会话保持运行",
+        );
+        let mut inner = self.inner.lock().await;
+        inner.record = Some(paused_record);
+        inner.install = Some(install);
+        inner.child = child;
+        inner.payload = Some(payload);
+        inner.status = status.clone();
+        Ok(status)
+    }
+
+    pub async fn resume(self: &Arc<Self>) -> AppResult<RuntimeStatus> {
+        let (record, install, payload) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.record.clone(),
+                inner.install.clone(),
+                inner.payload.clone(),
+            )
+        };
+        let Some(record) = record else {
+            return Err(AppError::Runtime("当前没有可恢复的暂停会话".into()));
+        };
+        if !record.paused {
+            return Ok(self.status().await);
+        }
+        let payload = payload.ok_or_else(|| AppError::Runtime("暂停主题载荷不可用".into()))?;
+        let install = match install {
+            Some(install) => install,
+            None => CodexInstall::discover()?,
+        };
+        validate_saved_install(&install, &record)?;
+        verify_endpoint(&self.http, &install, &record).await?;
+        if let Err(error) =
+            cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
+                .await
+        {
+            let message = format!("恢复主题失败：{error}");
+            self.inner.lock().await.status = status_for_record("paused", &record, &message);
+            return Err(AppError::Runtime(message));
+        }
+        let mut active_record = record.clone();
+        active_record.paused = false;
+        if let Err(error) = self.persist(Some(&active_record)) {
+            let rollback =
+                cdp::remove_from_verified_targets(&self.http, record.port, &record.browser_id)
+                    .await;
+            let (phase, message) = match rollback {
+                Ok(_) => (
+                    "paused",
+                    format!("恢复状态无法保存，已回到暂停状态：{error}"),
+                ),
+                Err(rollback_error) => (
+                    "error",
+                    format!(
+                        "主题已注入但恢复状态无法保存：{error}；回滚移除也失败：{rollback_error}"
+                    ),
+                ),
+            };
+            self.inner.lock().await.status = status_for_record(phase, &record, &message);
+            return Err(AppError::Runtime(message));
+        }
+        let child = self.inner.lock().await.child.take();
+        self.start_watcher(active_record, install, child, payload)
+            .await;
+        Ok(self.status().await)
+    }
+
+    pub async fn diagnostics(&self) -> RuntimeDiagnostics {
+        let (runtime, record, managed_install) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.status.clone(),
+                inner.record.clone(),
+                inner.install.clone(),
+            )
+        };
+        let mut notes = Vec::new();
+        let install = match managed_install {
+            Some(install) => Some(install),
+            None => match CodexInstall::discover() {
+                Ok(install) => Some(install),
+                Err(error) => {
+                    notes.push(error.to_string());
+                    None
+                }
+            },
+        };
+        let codex_running = install
+            .as_ref()
+            .and_then(|install| match install.is_running() {
+                Ok(running) => Some(running),
+                Err(error) => {
+                    notes.push(format!("Codex 进程检查失败：{error}"));
+                    None
+                }
+            });
+        let mut listener_verified = None;
+        let mut endpoint_verified = None;
+        let mut verified_targets = None;
+        if let (Some(record), Some(install)) = (&record, &install) {
+            if pending_launch(record) {
+                notes.push("保存的 CDP 启动尚未完成".into());
+            } else if validate_saved_install(install, record).is_err() {
+                listener_verified = Some(false);
+                endpoint_verified = Some(false);
+                notes.push("保存的会话与当前官方 Codex 安装不一致".into());
+            } else {
+                let owner_ok = install.verify_listener_owner(record.port).unwrap_or(false);
+                listener_verified = Some(owner_ok);
+                let endpoint_ok =
+                    owner_ok && verify_endpoint(&self.http, install, record).await.is_ok();
+                endpoint_verified = Some(endpoint_ok);
+                if endpoint_ok {
+                    match cdp::count_codex_targets(&self.http, record.port, &record.browser_id)
+                        .await
+                    {
+                        Ok(count) => verified_targets = Some(count),
+                        Err(error) => notes.push(format!("渲染页检查失败：{error}")),
+                    }
+                }
+            }
+        }
+        RuntimeDiagnostics {
+            generated_at: Utc::now().to_rfc3339(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            platform: std::env::consts::OS.into(),
+            architecture: std::env::consts::ARCH.into(),
+            runtime,
+            saved_session: record.is_some(),
+            paused: record.as_ref().is_some_and(|record| record.paused),
+            codex_found: install.is_some(),
+            codex_version: install.as_ref().map(|install| install.version.clone()),
+            codex_identity: install.as_ref().map(|install| install.identity.clone()),
+            executable: install
+                .as_ref()
+                .map(|install| install.executable.to_string_lossy().into_owned()),
+            codex_running,
+            listener_verified,
+            endpoint_verified,
+            verified_targets,
+            notes,
+        }
+    }
+
     pub async fn restore(self: &Arc<Self>) -> AppResult<RuntimeStatus> {
+        self.stop_watcher().await;
         let (record, install, mut child) = {
             let mut inner = self.inner.lock().await;
-            if let Some(cancel) = inner.cancel.take() {
-                let _ = cancel.send(true);
-            }
             inner.status.phase = "stopping".into();
             inner.status.message = "正在移除注入并关闭 CDP 会话".into();
             (
@@ -468,6 +695,8 @@ impl RuntimeManager {
             let mut inner = self.inner.lock().await;
             inner.record = None;
             inner.install = None;
+            inner.child = None;
+            inner.payload = None;
             inner.status = status.clone();
             return Ok(status);
         }
@@ -504,6 +733,7 @@ impl RuntimeManager {
         inner.record = None;
         inner.install = None;
         inner.child = None;
+        inner.payload = None;
         inner.status = status.clone();
         Ok(status)
     }
@@ -532,11 +762,12 @@ impl RuntimeManager {
             inner.install = Some(install.clone());
             inner.child = child;
             inner.cancel = Some(cancel);
+            inner.payload = Some(payload.clone());
             generation
         };
         let manager = Arc::clone(self);
         let theme_key = format!("{}:{}@{}", record.source_id, record.skin_id, record.version);
-        tauri::async_runtime::spawn(async move {
+        let watcher = tauri::async_runtime::spawn(async move {
             let mut ticker = interval(Duration::from_secs(2));
             let mut failures = 0_u8;
             loop {
@@ -568,12 +799,33 @@ impl RuntimeManager {
                 }
             }
         });
+        let mut inner = self.inner.lock().await;
+        if inner.generation == generation {
+            inner.watcher = Some(watcher);
+        } else {
+            watcher.abort();
+        }
+    }
+
+    async fn stop_watcher(&self) {
+        let (cancel, watcher) = {
+            let mut inner = self.inner.lock().await;
+            inner.generation += 1;
+            (inner.cancel.take(), inner.watcher.take())
+        };
+        if let Some(cancel) = cancel {
+            let _ = cancel.send(true);
+        }
+        if let Some(watcher) = watcher {
+            let _ = watcher.await;
+        }
     }
 
     async fn mark_watcher_error(&self, generation: u64, record: &RuntimeRecord) {
         let mut inner = self.inner.lock().await;
         if inner.generation == generation {
             inner.cancel = None;
+            inner.watcher = None;
             inner.status = status_for_record(
                 "error",
                 record,
@@ -593,6 +845,7 @@ impl RuntimeManager {
         inner.record = None;
         inner.install = None;
         inner.child = None;
+        inner.payload = None;
         inner.status = RuntimeStatus {
             phase: "error".into(),
             active_source_id: Some(installed.source_id.clone()),
@@ -789,6 +1042,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/ChatGPT.app/test".into(),
             codex_identity: "identity".into(),
+            paused: false,
         };
         let status = status_for_record("running", &record, "ok");
         assert_eq!(status.active_source_id.as_deref(), Some("source"));
@@ -815,6 +1069,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/ChatGPT.app/test".into(),
             codex_identity: "official".into(),
+            paused: false,
         };
         assert!(validate_saved_install(&install, &record).is_ok());
         record.codex_identity = "other".into();
@@ -833,8 +1088,26 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/Codex.app/test".into(),
             codex_identity: "official".into(),
+            paused: false,
         };
         assert!(pending_launch(&record));
+    }
+
+    #[test]
+    fn legacy_runtime_record_defaults_to_active() {
+        let record: RuntimeRecord = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "sourceId": "source",
+            "skinId": "night",
+            "version": "1",
+            "port": 9341,
+            "browserId": "browser",
+            "platform": "macos",
+            "executable": "/Applications/Codex.app/test",
+            "codexIdentity": "official"
+        }))
+        .unwrap();
+        assert!(!record.paused);
     }
 
     #[tokio::test]
@@ -857,6 +1130,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/ChatGPT.app/test".into(),
             codex_identity: "official".into(),
+            paused: false,
         };
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         let manager = RuntimeManager::new(path.clone()).unwrap();
