@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::{watch, Mutex};
-use tokio::time::{interval, sleep, Instant};
+use tokio::time::{interval, sleep, sleep_until, Instant};
 
 const RUNTIME_SCHEMA: u32 = 1;
-const READINESS_SNAPSHOT_LEAD: Duration = Duration::from_secs(35);
+const READINESS_SNAPSHOT_LEAD: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1248,10 +1248,27 @@ async fn wait_until_ready_and_apply(
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
     let mut last_browser_id = None;
+    let mut snapshot_browser_id = None;
     let mut pending_snapshot: Option<JoinHandle<Value>> = None;
     while Instant::now() < deadline {
         match cdp::browser_identity(&manager.http, port).await {
             Ok(identity) => {
+                if snapshot_browser_id.as_deref() != Some(identity.id.as_str()) {
+                    if let Some(snapshot) = pending_snapshot.take() {
+                        snapshot.abort();
+                    }
+                    let http = manager.http.clone();
+                    let expected_browser_id = identity.id.clone();
+                    let snapshot_at = deadline
+                        .checked_sub(READINESS_SNAPSHOT_LEAD)
+                        .unwrap_or(deadline);
+                    pending_snapshot = Some(tauri::async_runtime::spawn(async move {
+                        sleep_until(snapshot_at).await;
+                        cdp::diagnostic_snapshot(&http, port, Some(expected_browser_id.as_str()))
+                            .await
+                    }));
+                    snapshot_browser_id = Some(identity.id.clone());
+                }
                 last_browser_id = Some(identity.id.clone());
                 if !install.verify_listener_owner(port)? {
                     return Err(AppError::Runtime(
@@ -1272,17 +1289,6 @@ async fn wait_until_ready_and_apply(
                 }
             }
             Err(error) => last_error = error.to_string(),
-        }
-        if pending_snapshot.is_none()
-            && last_browser_id.is_some()
-            && deadline.saturating_duration_since(Instant::now()) <= READINESS_SNAPSHOT_LEAD
-        {
-            // Capture while the launched process is still alive, then consume the result off-path.
-            let http = manager.http.clone();
-            let expected_browser_id = last_browser_id.clone();
-            pending_snapshot = Some(tauri::async_runtime::spawn(async move {
-                cdp::diagnostic_snapshot(&http, port, expected_browser_id.as_deref()).await
-            }));
         }
         sleep(Duration::from_millis(350)).await;
     }
