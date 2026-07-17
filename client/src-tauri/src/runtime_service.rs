@@ -190,6 +190,7 @@ impl RuntimeManager {
             self.spawn_cdp_failure_snapshot(
                 "cdp_recovery_probe_failed",
                 error.to_string(),
+                install.clone(),
                 record.port,
                 Some(record.browser_id.clone()),
             );
@@ -304,6 +305,7 @@ impl RuntimeManager {
                     self.spawn_cdp_failure_snapshot(
                         "cdp_apply_probe_failed",
                         failure.clone(),
+                        install.clone(),
                         active.port,
                         Some(active.browser_id.clone()),
                     );
@@ -625,6 +627,7 @@ impl RuntimeManager {
             self.spawn_cdp_failure_snapshot(
                 "cdp_resume_probe_failed",
                 failure.clone(),
+                install.clone(),
                 record.port,
                 Some(record.browser_id.clone()),
             );
@@ -962,6 +965,7 @@ impl RuntimeManager {
                                     .spawn_cdp_failure_snapshot(
                                         "cdp_watcher_probe_failed",
                                         failure,
+                                        install.clone(),
                                         record.port,
                                         Some(record.browser_id.clone()),
                                     );
@@ -1135,13 +1139,20 @@ impl RuntimeManager {
         self: &Arc<Self>,
         event: &'static str,
         message: String,
+        install: CodexInstall,
         port: u16,
         browser_id: Option<String>,
     ) {
         let manager = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             manager
-                .record_cdp_failure_snapshot(event, &message, port, browser_id.as_deref())
+                .record_cdp_failure_snapshot(
+                    event,
+                    &message,
+                    &install,
+                    port,
+                    browser_id.as_deref(),
+                )
                 .await;
         });
     }
@@ -1150,10 +1161,11 @@ impl RuntimeManager {
         &self,
         event: &str,
         message: &str,
+        install: &CodexInstall,
         port: u16,
         browser_id: Option<&str>,
     ) {
-        let snapshot = cdp::diagnostic_snapshot(&self.http, port, browser_id).await;
+        let snapshot = guarded_diagnostic_snapshot(&self.http, install, port, browser_id).await;
         self.record_log(
             "error",
             event,
@@ -1164,6 +1176,27 @@ impl RuntimeManager {
                 "snapshot": snapshot,
             }),
         );
+    }
+}
+
+async fn guarded_diagnostic_snapshot(
+    http: &Client,
+    install: &CodexInstall,
+    port: u16,
+    browser_id: Option<&str>,
+) -> Value {
+    match install.verify_listener_owner(port) {
+        Ok(true) => cdp::diagnostic_snapshot(http, port, browser_id).await,
+        Ok(false) => json!({
+            "port": port,
+            "stage": "listenerOwner",
+            "verifiedOwner": false,
+        }),
+        Err(error) => json!({
+            "port": port,
+            "stage": "listenerOwner",
+            "error": error.to_string(),
+        }),
     }
 }
 
@@ -1282,25 +1315,13 @@ async fn wait_until_ready_and_apply(
                         .unwrap_or(deadline);
                     pending_snapshot = Some(tauri::async_runtime::spawn(async move {
                         sleep_until(snapshot_at).await;
-                        match snapshot_install.verify_listener_owner(port) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                return json!({
-                                    "port": port,
-                                    "stage": "listenerOwner",
-                                    "verifiedOwner": false,
-                                });
-                            }
-                            Err(error) => {
-                                return json!({
-                                    "port": port,
-                                    "stage": "listenerOwner",
-                                    "error": error.to_string(),
-                                });
-                            }
-                        }
-                        cdp::diagnostic_snapshot(&http, port, Some(expected_browser_id.as_str()))
-                            .await
+                        guarded_diagnostic_snapshot(
+                            &http,
+                            &snapshot_install,
+                            port,
+                            Some(expected_browser_id.as_str()),
+                        )
+                        .await
                     }));
                     snapshot_browser_id = Some(identity.id.clone());
                 }
@@ -1323,6 +1344,7 @@ async fn wait_until_ready_and_apply(
         sleep(Duration::from_millis(350)).await;
     }
     let manager = Arc::clone(manager);
+    let diagnostic_install = install.clone();
     let diagnostic_browser_id = last_browser_id.clone();
     let diagnostic_error = last_error.clone();
     tauri::async_runtime::spawn(async move {
@@ -1335,8 +1357,13 @@ async fn wait_until_ready_and_apply(
                 })
             }),
             None => {
-                cdp::diagnostic_snapshot(&manager.http, port, diagnostic_browser_id.as_deref())
-                    .await
+                guarded_diagnostic_snapshot(
+                    &manager.http,
+                    &diagnostic_install,
+                    port,
+                    diagnostic_browser_id.as_deref(),
+                )
+                .await
             }
         };
         manager.record_log(
