@@ -90,7 +90,7 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   const artUrl = URL.createObjectURL(new Blob([bytes], {{ type: mime }}));
   const touched = new Set();
 
-  const detectShellMode = () => {{
+  const readAppearancePreference = () => {{
     const root = document.documentElement;
     const classes = `${{root?.className || ""}} ${{document.body?.className || ""}}`.toLowerCase();
     if (/\b(dark|theme-dark|appearance-dark)\b/.test(classes)) return "dark";
@@ -100,25 +100,60 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
       root?.getAttribute("data-color-mode") || "").toLowerCase();
     if (declared.includes("dark")) return "dark";
     if (declared.includes("light")) return "light";
+    if (declared.includes("system")) return "system";
+    const checked = document.querySelector('input[name="appearance-theme"]:checked');
+    const choice = `${{checked?.getAttribute("aria-label") || ""}} ${{
+      checked?.getAttribute("value") || ""
+    }}`.toLowerCase();
+    if (choice.includes("dark") || choice.includes("暗")) return "dark";
+    if (choice.includes("light") || choice.includes("浅")) return "light";
+    if (choice.includes("system") || choice.includes("系统")) return "system";
+    return null;
+  }};
+
+  let mediaQuery = null;
+  try {{ mediaQuery = matchMedia("(prefers-color-scheme: dark)"); }} catch {{}}
+  const readSystemMode = () => mediaQuery?.matches ? "dark" : "light";
+  const readInitialComputedMode = () => {{
+    const root = document.documentElement;
     try {{
       const scheme = getComputedStyle(root).colorScheme || "";
       if (scheme.includes("dark") && !scheme.includes("light")) return "dark";
       if (scheme.includes("light") && !scheme.includes("dark")) return "light";
-      return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    }} catch {{
-      return "light";
-    }}
+    }} catch {{}}
+    return null;
   }};
-  // Capture the host appearance before adding any LumaDrobe classes or CSS.
-  // Later ensure calls must not infer Codex appearance from our own theme.
-  const initialShellMode = detectShellMode();
+
+  // The computed style is safe only before adding LumaDrobe classes or CSS.
+  // Subsequent refreshes use Codex-owned signals and matchMedia exclusively.
+  let previousPreference = readAppearancePreference();
+  let previousSystemMode = readSystemMode();
+  let shellMode = previousPreference === "dark" || previousPreference === "light"
+    ? previousPreference
+    : previousPreference === "system"
+      ? previousSystemMode
+      : readInitialComputedMode() || previousSystemMode;
+  const refreshShellMode = () => {{
+    const preference = readAppearancePreference();
+    const systemMode = readSystemMode();
+    if (preference === "dark" || preference === "light") {{
+      shellMode = preference;
+    }} else if (preference === "system") {{
+      shellMode = systemMode;
+    }} else if (previousPreference !== null || systemMode !== previousSystemMode) {{
+      shellMode = systemMode;
+    }}
+    previousPreference = preference;
+    previousSystemMode = systemMode;
+    return shellMode;
+  }};
 
   const ensure = () => {{
     const root = document.documentElement;
     if (!root) return;
     root.classList.add(...ROOT_CLASSES);
     root.dataset.lumadrobeTheme = theme.key;
-    root.setAttribute("data-dream-shell", initialShellMode);
+    root.setAttribute("data-dream-shell", refreshShellMode());
     for (const property of ART_PROPERTIES) {{
       root.style.setProperty(property, `url("${{artUrl}}")`);
     }}
@@ -169,9 +204,17 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   const observer = new MutationObserver(() => queueMicrotask(ensure));
   observer.observe(document.documentElement, {{ childList: true, subtree: true }});
   const timer = setInterval(ensure, 5000);
+  let mediaHandler = null;
+  if (mediaQuery) {{
+    mediaHandler = () => queueMicrotask(ensure);
+    try {{ mediaQuery.addEventListener("change", mediaHandler); }} catch {{}}
+  }}
   const cleanup = () => {{
     observer.disconnect();
     clearInterval(timer);
+    if (mediaQuery && mediaHandler) {{
+      try {{ mediaQuery.removeEventListener("change", mediaHandler); }} catch {{}}
+    }}
     document.documentElement?.classList.remove(...ROOT_CLASSES);
     if (document.documentElement?.dataset.lumadrobeTheme === theme.key) {{
       delete document.documentElement.dataset.lumadrobeTheme;
@@ -194,7 +237,17 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
     if (window[STATE_KEY]?.themeKey === theme.key) delete window[STATE_KEY];
     return true;
   }};
-  window[STATE_KEY] = {{ themeKey: theme.key, ensure, status, cleanup, observer, timer, artUrl }};
+  window[STATE_KEY] = {{
+    themeKey: theme.key,
+    ensure,
+    status,
+    cleanup,
+    observer,
+    timer,
+    mediaQuery,
+    mediaHandler,
+    artUrl,
+  }};
   ensure();
   return {{ ...status(), themeKey: theme.key, reused: false }};
 }})({theme_json}, {css_json}, {art_json})"#
@@ -314,10 +367,16 @@ mod tests {
         assert!(payload.contains("rootTagged"));
         assert!(payload.contains("artAttached"));
         let appearance = payload
-            .find("const initialShellMode = detectShellMode()")
+            .find("readInitialComputedMode() || previousSystemMode")
             .unwrap();
         let mutation = payload.find("root.classList.add(...ROOT_CLASSES)").unwrap();
         assert!(appearance < mutation);
+        assert!(payload.contains(
+            "root.setAttribute(\"data-dream-shell\", refreshShellMode())"
+        ));
+        assert!(payload.contains(
+            "mediaQuery.addEventListener(\"change\", mediaHandler)"
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
