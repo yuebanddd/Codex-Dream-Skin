@@ -162,7 +162,12 @@ impl RuntimeManager {
         }
         let install = CodexInstall::discover()?;
         validate_saved_install(&install, record)?;
-        verify_endpoint(&self.http, &install, record).await?;
+        self.verify_endpoint_with_snapshot(
+            "cdp_recovery_endpoint_failed",
+            &install,
+            record,
+        )
+        .await?;
         let installed = installed_store
             .lock()
             .await
@@ -259,7 +264,10 @@ impl RuntimeManager {
         let mut reuse = None;
         if let (Some(record), Some(install)) = (&previous_record, &previous_install) {
             if validate_saved_install(install, record).is_ok()
-                && verify_endpoint(&self.http, install, record).await.is_ok()
+                && self
+                    .verify_endpoint_with_snapshot("cdp_reuse_endpoint_failed", install, record)
+                    .await
+                    .is_ok()
             {
                 reuse = Some((record.clone(), install.clone()));
             }
@@ -281,7 +289,12 @@ impl RuntimeManager {
                     }
                 };
                 if validate_saved_install(&fresh_install, record).is_ok()
-                    && verify_endpoint(&self.http, &fresh_install, record)
+                    && self
+                        .verify_endpoint_with_snapshot(
+                            "cdp_reuse_endpoint_failed",
+                            &fresh_install,
+                            record,
+                        )
                         .await
                         .is_ok()
                 {
@@ -549,7 +562,8 @@ impl RuntimeManager {
             None => CodexInstall::discover()?,
         };
         validate_saved_install(&install, &record)?;
-        verify_endpoint(&self.http, &install, &record).await?;
+        self.verify_endpoint_with_snapshot("cdp_pause_endpoint_failed", &install, &record)
+            .await?;
         {
             let mut inner = self.inner.lock().await;
             inner.status = status_for_record("pausing", &record, "正在停止重注入并移除主题");
@@ -618,7 +632,8 @@ impl RuntimeManager {
             None => CodexInstall::discover()?,
         };
         validate_saved_install(&install, &record)?;
-        verify_endpoint(&self.http, &install, &record).await?;
+        self.verify_endpoint_with_snapshot("cdp_resume_endpoint_failed", &install, &record)
+            .await?;
         if let Err(error) =
             cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
                 .await
@@ -1133,6 +1148,27 @@ impl RuntimeManager {
 
     fn record_log(&self, level: &str, event: &str, message: impl Into<String>, data: Value) {
         let _ = self.log.record(level, event, message, data);
+    }
+
+    async fn verify_endpoint_with_snapshot(
+        self: &Arc<Self>,
+        event: &'static str,
+        install: &CodexInstall,
+        record: &RuntimeRecord,
+    ) -> AppResult<()> {
+        match verify_endpoint(&self.http, install, record).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.spawn_cdp_failure_snapshot(
+                    event,
+                    error.to_string(),
+                    install.clone(),
+                    record.port,
+                    Some(record.browser_id.clone()),
+                );
+                Err(error)
+            }
+        }
     }
 
     fn spawn_cdp_failure_snapshot(
