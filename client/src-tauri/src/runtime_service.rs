@@ -20,6 +20,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::time::{interval, sleep, Instant};
 
 const RUNTIME_SCHEMA: u32 = 1;
+const READINESS_SNAPSHOT_LEAD: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,7 +191,7 @@ impl RuntimeManager {
                 "cdp_recovery_probe_failed",
                 error.to_string(),
                 record.port,
-                record.browser_id.clone(),
+                Some(record.browser_id.clone()),
             );
             return Err(error);
         }
@@ -304,7 +305,7 @@ impl RuntimeManager {
                         "cdp_apply_probe_failed",
                         failure.clone(),
                         active.port,
-                        active.browser_id.clone(),
+                        Some(active.browser_id.clone()),
                     );
                     return self
                         .fail_apply_attempt(
@@ -482,8 +483,7 @@ impl RuntimeManager {
                 codex_identity: install.identity.clone(),
                 paused: false,
             };
-            let ready =
-                wait_until_ready_and_apply(&self.http, &install, port, &payload, &self.log).await;
+            let ready = wait_until_ready_and_apply(self, &install, port, &payload).await;
             let (browser_id, applied_targets) = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
@@ -626,7 +626,7 @@ impl RuntimeManager {
                 "cdp_resume_probe_failed",
                 failure.clone(),
                 record.port,
-                record.browser_id.clone(),
+                Some(record.browser_id.clone()),
             );
             let message = format!("恢复主题失败：{failure}");
             self.inner.lock().await.status = status_for_record("paused", &record, &message);
@@ -963,7 +963,7 @@ impl RuntimeManager {
                                         "cdp_watcher_probe_failed",
                                         failure,
                                         record.port,
-                                        record.browser_id.clone(),
+                                        Some(record.browser_id.clone()),
                                     );
                                 break;
                             }
@@ -1136,12 +1136,12 @@ impl RuntimeManager {
         event: &'static str,
         message: String,
         port: u16,
-        browser_id: String,
+        browser_id: Option<String>,
     ) {
         let manager = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             manager
-                .record_cdp_failure_snapshot(event, &message, port, &browser_id)
+                .record_cdp_failure_snapshot(event, &message, port, browser_id.as_deref())
                 .await;
         });
     }
@@ -1151,9 +1151,9 @@ impl RuntimeManager {
         event: &str,
         message: &str,
         port: u16,
-        browser_id: &str,
+        browser_id: Option<&str>,
     ) {
-        let snapshot = cdp::diagnostic_snapshot(&self.http, port, Some(browser_id)).await;
+        let snapshot = cdp::diagnostic_snapshot(&self.http, port, browser_id).await;
         self.record_log(
             "error",
             event,
@@ -1240,17 +1240,17 @@ fn select_available_port(preferred: u16) -> AppResult<u16> {
 }
 
 async fn wait_until_ready_and_apply(
-    http: &Client,
+    manager: &Arc<RuntimeManager>,
     install: &CodexInstall,
     port: u16,
     payload: &str,
-    log: &RuntimeLog,
 ) -> AppResult<(String, usize)> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
     let mut last_browser_id = None;
+    let mut pending_snapshot: Option<JoinHandle<Value>> = None;
     while Instant::now() < deadline {
-        match cdp::browser_identity(http, port).await {
+        match cdp::browser_identity(&manager.http, port).await {
             Ok(identity) => {
                 last_browser_id = Some(identity.id.clone());
                 if !install.verify_listener_owner(port)? {
@@ -1258,27 +1258,73 @@ async fn wait_until_ready_and_apply(
                         "CDP 端口监听者不是已验证的官方 Codex".into(),
                     ));
                 }
-                match cdp::apply_to_verified_targets(http, port, &identity.id, payload).await {
-                    Ok(count) if count > 0 => return Ok((identity.id, count)),
+                match cdp::apply_to_verified_targets(
+                    &manager.http,
+                    port,
+                    &identity.id,
+                    payload,
+                )
+                .await
+                {
+                    Ok(count) if count > 0 => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        return Ok((identity.id, count));
+                    }
                     Ok(_) => last_error = "Codex 渲染页尚未完成 DOM 初始化".into(),
                     Err(error) => last_error = error.to_string(),
                 }
             }
             Err(error) => last_error = error.to_string(),
         }
+        if pending_snapshot.is_none()
+            && last_browser_id.is_some()
+            && deadline.saturating_duration_since(Instant::now()) <= READINESS_SNAPSHOT_LEAD
+        {
+            // Capture while the launched process is still alive, then consume the result off-path.
+            let http = manager.http.clone();
+            let expected_browser_id = last_browser_id.clone();
+            pending_snapshot = Some(tauri::async_runtime::spawn(async move {
+                cdp::diagnostic_snapshot(&http, port, expected_browser_id.as_deref()).await
+            }));
+        }
         sleep(Duration::from_millis(350)).await;
     }
-    let snapshot = cdp::diagnostic_snapshot(http, port, last_browser_id.as_deref()).await;
-    let _ = log.record(
-        "error",
-        "cdp_readiness_timeout",
-        "Codex renderer did not become injectable before the deadline",
-        json!({
-            "port": port,
-            "lastError": last_error.clone(),
-            "snapshot": snapshot,
-        }),
-    );
+    let manager = Arc::clone(manager);
+    let diagnostic_browser_id = last_browser_id.clone();
+    let diagnostic_error = last_error.clone();
+    tauri::async_runtime::spawn(async move {
+        let snapshot = match pending_snapshot {
+            Some(snapshot) => snapshot.await.unwrap_or_else(|error| {
+                json!({
+                    "port": port,
+                    "stage": "snapshotTask",
+                    "error": error.to_string(),
+                })
+            }),
+            None => {
+                cdp::diagnostic_snapshot(
+                    &manager.http,
+                    port,
+                    diagnostic_browser_id.as_deref(),
+                )
+                .await
+            }
+        };
+        manager.record_log(
+            "error",
+            "cdp_readiness_timeout",
+            format!(
+                "Codex renderer did not become injectable before the deadline: {diagnostic_error}"
+            ),
+            json!({
+                "port": port,
+                "browserId": diagnostic_browser_id,
+                "snapshot": snapshot,
+            }),
+        );
+    });
     Err(AppError::Runtime(format!(
         "等待 Codex CDP 与主题注入超时：{last_error}"
     )))
