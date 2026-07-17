@@ -10,6 +10,7 @@ on:
       - "docs/client-goal.md"
       - "docs/skin-source-spec-v1.md"
       - ".github/workflows/client-checks.yml"
+      - ".github/workflows/preview-packages.yml"
   push:
     branches: [release]
     paths:
@@ -34,6 +35,7 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: npm ci
+      - run: npm run check:version
       - run: npm run check
       - run: npm run build
 

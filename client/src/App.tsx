@@ -6,6 +6,7 @@ import {
   CirclePause,
   CirclePlay,
   Download,
+  FileJson,
   GalleryVerticalEnd,
   Github,
   Import,
@@ -23,6 +24,7 @@ import {
   addSource,
   applyAndLaunch,
   deleteInstalledSkin,
+  exportRuntimeDiagnostics,
   installSkin,
   getRuntimeStatus,
   getRuntimeDiagnostics,
@@ -120,6 +122,7 @@ function App() {
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(
     null,
   );
+  const [diagnosticExportPath, setDiagnosticExportPath] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -159,6 +162,19 @@ function App() {
       const nextDiagnostics = await getRuntimeDiagnostics();
       setDiagnostics(nextDiagnostics);
       setRuntime(nextDiagnostics.runtime);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(null);
+    }
+  }, []);
+
+  const handleExportDiagnostics = useCallback(async () => {
+    setWorking("diagnostics-export");
+    setError("");
+    setDiagnosticExportPath("");
+    try {
+      setDiagnosticExportPath(await exportRuntimeDiagnostics());
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -411,7 +427,10 @@ function App() {
           <DiagnosticsView
             diagnostics={diagnostics}
             loading={working === "diagnostics"}
+            exporting={working === "diagnostics-export"}
+            exportPath={diagnosticExportPath}
             onRefresh={refreshDiagnostics}
+            onExport={handleExportDiagnostics}
           />
         )}
       </main>
@@ -624,12 +643,12 @@ function ThemeCard({
       className={selected ? "theme-card selected" : "theme-card"}
       onClick={onSelect}
     >
-      <div
-        className="theme-art"
-        style={{
-          backgroundImage: `url(${skin.previewUrl ?? skin.backgroundUrl})`,
-        }}
-      >
+      <div className="theme-art">
+        <img
+          className="theme-art-image"
+          src={skin.previewUrl ?? skin.backgroundUrl}
+          alt=""
+        />
         <span
           className={status === "remote" ? "remote-badge" : "imported-badge"}
         >
@@ -653,7 +672,7 @@ function ThemeCard({
         <p>{skin.manifest.description ?? "为你的 Codex 工作台准备的主题。"}</p>
         <div className="swatches">
           {(colors.length ? colors : ["#6e45e8", "#0b0a11"]).map((color) => (
-            <i key={color} style={{ background: color }} />
+            <ColorSwatch key={color} color={color} />
           ))}
         </div>
       </footer>
@@ -713,12 +732,12 @@ function FittingRoom({
               : "在线主题"}
         </span>
       </header>
-      <div
-        className="poster"
-        style={{
-          backgroundImage: `url(${skin.previewUrl ?? skin.backgroundUrl})`,
-        }}
-      >
+      <div className="poster">
+        <img
+          className="poster-image"
+          src={skin.previewUrl ?? skin.backgroundUrl}
+          alt=""
+        />
         <div>
           <small>{hasLocalVersion ? "LOCAL EDITION" : "SOURCE PREVIEW"}</small>
           <strong>{skin.manifest.name}</strong>
@@ -730,7 +749,7 @@ function FittingRoom({
         <div>
           {(colors.length ? colors : ["#6e45e8", "#eee9df", "#0a0910"]).map(
             (color) => (
-              <i key={color} style={{ background: color }} />
+              <ColorSwatch key={color} color={color} />
             ),
           )}
         </div>
@@ -808,6 +827,14 @@ function FittingRoom({
         </button>
       </div>
     </aside>
+  );
+}
+
+function ColorSwatch({ color }: { color: string }) {
+  return (
+    <svg className="color-swatch" viewBox="0 0 12 12" aria-hidden="true">
+      <circle cx="6" cy="6" r="6" fill={color} />
+    </svg>
   );
 }
 
@@ -935,11 +962,17 @@ function RestoreView({
 function DiagnosticsView({
   diagnostics,
   loading,
+  exporting,
+  exportPath,
   onRefresh,
+  onExport,
 }: {
   diagnostics: RuntimeDiagnostics | null;
   loading: boolean;
+  exporting: boolean;
+  exportPath: string;
   onRefresh: () => Promise<void>;
+  onExport: () => Promise<void>;
 }) {
   const stateLabel = (value?: boolean) =>
     value === undefined ? "未检查" : value ? "通过" : "失败";
@@ -953,10 +986,22 @@ function DiagnosticsView({
           <h1>运行诊断</h1>
           <p>只读检查 Codex 安装、进程身份、回环监听和渲染器会话。</p>
         </div>
-        <button disabled={loading} onClick={() => void onRefresh()}>
-          <RefreshCcw className={loading ? "spin" : ""} />
-          重新检查
-        </button>
+        <div className="diagnostics-actions">
+          <button
+            disabled={loading || exporting || !diagnostics}
+            onClick={() => void onExport()}
+          >
+            {exporting ? <LoaderCircle className="spin" /> : <FileJson />}
+            {exporting ? "正在导出" : "导出 JSON"}
+          </button>
+          <button
+            disabled={loading || exporting}
+            onClick={() => void onRefresh()}
+          >
+            <RefreshCcw className={loading ? "spin" : ""} />
+            重新检查
+          </button>
+        </div>
       </header>
       {diagnostics ? (
         <>
@@ -1004,6 +1049,10 @@ function DiagnosticsView({
               <strong>v{diagnostics.clientVersion}</strong>
             </div>
             <div>
+              <span>构建提交</span>
+              <strong>{diagnostics.buildCommit.slice(0, 12)}</strong>
+            </div>
+            <div>
               <span>平台</span>
               <strong>
                 {diagnostics.platform} · {diagnostics.architecture}
@@ -1030,6 +1079,10 @@ function DiagnosticsView({
             <small>
               检查时间：{new Date(diagnostics.generatedAt).toLocaleString()}
             </small>
+            <small>
+              导出文件会包含本机可执行文件路径，请在公开分享前检查内容。
+            </small>
+            {exportPath && <code>已导出：{exportPath}</code>}
           </div>
         </>
       ) : (

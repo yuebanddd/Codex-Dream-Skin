@@ -98,6 +98,7 @@ pub struct RuntimeStatus {
 pub struct RuntimeDiagnostics {
     pub generated_at: String,
     pub client_version: String,
+    pub build_commit: String,
     pub platform: String,
     pub architecture: String,
     pub runtime: RuntimeStatus,

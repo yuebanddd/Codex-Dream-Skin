@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 — 2026-07-17
+
+- 新增 macOS arm64/x64 DMG 与 Windows x64 NSIS 测试安装包工作流
+- 每个安装包产物附带 `BUILD-INFO.json` 和 `SHA256SUMS.txt`
+- 构建元数据记录版本、提交、平台、架构、大小与 SHA-256
+- 新增跨 package、Tauri 与 Cargo 配置的版本一致性检查
+- 客户端诊断信息增加构建提交，并支持显式导出 JSON
+- 测试安装包保持无签名，不自动创建 GitHub Release
+- 版本升级至 0.5.0
+
 ## 0.4.0 — 2026-07-17
 
 - 新增不退出 Codex 的皮肤暂停与恢复，暂停状态跨 LumaDrobe 重启持久化

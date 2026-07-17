@@ -4,7 +4,7 @@ LumaDrobe 是跨平台 Codex 主题衣橱。桌面壳采用 Tauri 2，前端采�
 
 ## 当前阶段
 
-v0.4 已进入可测试 Alpha 阶段：
+v0.5 已进入可安装预览阶段：
 
 - 添加公开 GitHub 仓库作为皮肤订阅源
 - 支持 `?ref=branch-or-tag` 固定分支、标签或提交
@@ -21,6 +21,8 @@ v0.4 已进入可测试 Alpha 阶段：
 - 持久化最小运行状态，客户端重启后重新验证身份再恢复监护
 - 支持不退出 Codex 的皮肤暂停与恢复，并持久化暂停状态
 - 提供只读运行诊断，检查官方安装、进程、回环监听、CDP 会话和渲染页
+- 可由 GitHub Actions 构建 macOS DMG 与 Windows NSIS 无签名测试安装包
+- 诊断 JSON 和构建产物均记录版本与提交，安装包附带 SHA-256
 
 主题包导出、本地选图创建和更多 Codex 版本实机兼容性将在后续迭代接入。
 
@@ -42,6 +44,7 @@ npm run dev:web
 
 ```bash
 npm run check
+npm run check:version
 npm run build
 cd src-tauri
 cargo fmt --check
@@ -49,5 +52,7 @@ cargo test
 ```
 
 Rust 注入引擎当前仅支持 macOS 与 Windows。Linux 可以运行纯函数测试，但不能启动 Codex Desktop。
+
+测试安装包的获取、校验与安全提示见 [`../docs/preview-builds.md`](../docs/preview-builds.md)。
 
 协议定义见 [`../docs/skin-source-spec-v1.md`](../docs/skin-source-spec-v1.md)。

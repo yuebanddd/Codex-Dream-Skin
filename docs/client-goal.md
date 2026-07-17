@@ -19,13 +19,13 @@ LumaDrobe 是一个去中心化的 Codex 主题衣橱：任何人都可以用公
 
 ## 技术边界
 
-| 层 | 职责 |
-|---|---|
-| React UI | 主题衣橱、订阅源、试衣镜、导入导出、诊断状态 |
-| Tauri Commands | 稳定、最小的前后端 IPC 接口 |
-| Rust Services | GitHub 订阅、主题缓存、安装、更新、Codex 发现、CDP 生命周期 |
-| Renderer Payload | 随客户端发布的 JavaScript 适配器和 CSS 注入模板 |
-| Theme Repository | 声明式清单、图片、可选 CSS，不允许下发 JavaScript |
+| 层               | 职责                                                        |
+| ---------------- | ----------------------------------------------------------- |
+| React UI         | 主题衣橱、订阅源、试衣镜、导入导出、诊断状态                |
+| Tauri Commands   | 稳定、最小的前后端 IPC 接口                                 |
+| Rust Services    | GitHub 订阅、主题缓存、安装、更新、Codex 发现、CDP 生命周期 |
+| Renderer Payload | 随客户端发布的 JavaScript 适配器和 CSS 注入模板             |
+| Theme Repository | 声明式清单、图片、可选 CSS，不允许下发 JavaScript           |
 
 ## 里程碑
 
@@ -59,10 +59,12 @@ LumaDrobe 是一个去中心化的 Codex 主题衣橱：任何人都可以用公
 
 ### M4 · 发布质量
 
-- Windows 与 macOS 安装包
-- 自动更新与签名
-- 兼容性矩阵和截图验收
-- `release` 分支自动构建 GitHub Release
+- [x] Windows 与 macOS 无签名测试安装包
+- [x] 构建元数据、提交号与 SHA-256
+- [ ] Apple / Windows 正式签名
+- [ ] 自动更新
+- [ ] 兼容性矩阵和截图验收
+- [ ] `release` 分支自动构建 GitHub Release
 
 ## 非目标
 
