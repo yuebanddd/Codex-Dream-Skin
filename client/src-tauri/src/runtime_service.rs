@@ -162,12 +162,8 @@ impl RuntimeManager {
         }
         let install = CodexInstall::discover()?;
         validate_saved_install(&install, record)?;
-        self.verify_endpoint_with_snapshot(
-            "cdp_recovery_endpoint_failed",
-            &install,
-            record,
-        )
-        .await?;
+        self.verify_endpoint_with_snapshot("cdp_recovery_endpoint_failed", &install, record)
+            .await?;
         let installed = installed_store
             .lock()
             .await
