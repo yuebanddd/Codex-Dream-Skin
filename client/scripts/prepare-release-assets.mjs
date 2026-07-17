@@ -7,8 +7,9 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 const sourceDirectory = process.argv[2] ?? "downloaded-artifacts";
 const outputDirectory = process.argv[3] ?? "release-assets";
@@ -33,9 +34,16 @@ if (existsSync(outputDirectory)) {
 }
 
 const platforms = [
-  { artifact: "LumaDrobe-macOS-arm64", extension: ".dmg" },
-  { artifact: "LumaDrobe-macOS-x64", extension: ".dmg" },
-  { artifact: "LumaDrobe-Windows-x64", extension: ".exe" },
+  {
+    artifact: "LumaDrobe-macOS-arm64",
+    extension: ".dmg",
+    releaseName: `LumaDrobe-v${version}-macOS-arm64.dmg`,
+  },
+  {
+    artifact: "LumaDrobe-Windows-x64",
+    extension: ".exe",
+    releaseName: `LumaDrobe-v${version}-Windows-x64-Setup.exe`,
+  },
 ];
 mkdirSync(outputDirectory, { recursive: true });
 
@@ -80,14 +88,21 @@ for (const platform of platforms) {
     throw new Error(`${platform.artifact} SHA256SUMS.txt is inconsistent`);
   }
 
-  copyFileSync(packagePath, join(outputDirectory, basename(packageName)));
-  copyFileSync(
-    buildInfoPath,
+  copyFileSync(packagePath, join(outputDirectory, platform.releaseName));
+  writeFileSync(
     join(outputDirectory, `${platform.artifact}-BUILD-INFO.json`),
+    `${JSON.stringify(
+      {
+        ...buildInfo,
+        artifacts: [{ ...recorded, name: platform.releaseName }],
+      },
+      null,
+      2,
+    )}\n`,
   );
-  copyFileSync(
-    checksumsPath,
+  writeFileSync(
     join(outputDirectory, `${platform.artifact}-SHA256SUMS.txt`),
+    `${sha256}  ${platform.releaseName}\n`,
   );
 }
 

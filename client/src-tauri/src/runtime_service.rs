@@ -17,9 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::{watch, Mutex};
-use tokio::time::{interval, sleep, Instant};
+use tokio::time::{interval, sleep, sleep_until, Instant};
 
 const RUNTIME_SCHEMA: u32 = 1;
+const READINESS_SNAPSHOT_LEAD: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,7 +162,8 @@ impl RuntimeManager {
         }
         let install = CodexInstall::discover()?;
         validate_saved_install(&install, record)?;
-        verify_endpoint(&self.http, &install, record).await?;
+        self.verify_endpoint_with_snapshot("cdp_recovery_endpoint_failed", &install, record)
+            .await?;
         let installed = installed_store
             .lock()
             .await
@@ -182,8 +184,19 @@ impl RuntimeManager {
             );
             return Ok(());
         }
-        cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
-            .await?;
+        if let Err(error) =
+            cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
+                .await
+        {
+            self.spawn_cdp_failure_snapshot(
+                "cdp_recovery_probe_failed",
+                error.to_string(),
+                install.clone(),
+                record.port,
+                Some(record.browser_id.clone()),
+            );
+            return Err(error);
+        }
         self.start_watcher(record.clone(), install, None, payload)
             .await;
         Ok(())
@@ -247,7 +260,10 @@ impl RuntimeManager {
         let mut reuse = None;
         if let (Some(record), Some(install)) = (&previous_record, &previous_install) {
             if validate_saved_install(install, record).is_ok()
-                && verify_endpoint(&self.http, install, record).await.is_ok()
+                && self
+                    .verify_endpoint_with_snapshot("cdp_reuse_endpoint_failed", install, record)
+                    .await
+                    .is_ok()
             {
                 reuse = Some((record.clone(), install.clone()));
             }
@@ -269,7 +285,12 @@ impl RuntimeManager {
                     }
                 };
                 if validate_saved_install(&fresh_install, record).is_ok()
-                    && verify_endpoint(&self.http, &fresh_install, record)
+                    && self
+                        .verify_endpoint_with_snapshot(
+                            "cdp_reuse_endpoint_failed",
+                            &fresh_install,
+                            record,
+                        )
                         .await
                         .is_ok()
                 {
@@ -289,13 +310,21 @@ impl RuntimeManager {
             {
                 Ok(count) => count,
                 Err(error) => {
+                    let failure = error.to_string();
+                    self.spawn_cdp_failure_snapshot(
+                        "cdp_apply_probe_failed",
+                        failure.clone(),
+                        install.clone(),
+                        active.port,
+                        Some(active.browser_id.clone()),
+                    );
                     return self
                         .fail_apply_attempt(
                             &installed,
                             Some(active),
                             Some(install),
                             previous_child,
-                            error.to_string(),
+                            failure,
                         )
                         .await;
                 }
@@ -465,7 +494,7 @@ impl RuntimeManager {
                 codex_identity: install.identity.clone(),
                 paused: false,
             };
-            let ready = wait_until_ready_and_apply(&self.http, &install, port, &payload).await;
+            let ready = wait_until_ready_and_apply(self, &install, port, &payload).await;
             let (browser_id, applied_targets) = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
@@ -529,7 +558,8 @@ impl RuntimeManager {
             None => CodexInstall::discover()?,
         };
         validate_saved_install(&install, &record)?;
-        verify_endpoint(&self.http, &install, &record).await?;
+        self.verify_endpoint_with_snapshot("cdp_pause_endpoint_failed", &install, &record)
+            .await?;
         {
             let mut inner = self.inner.lock().await;
             inner.status = status_for_record("pausing", &record, "正在停止重注入并移除主题");
@@ -598,12 +628,21 @@ impl RuntimeManager {
             None => CodexInstall::discover()?,
         };
         validate_saved_install(&install, &record)?;
-        verify_endpoint(&self.http, &install, &record).await?;
+        self.verify_endpoint_with_snapshot("cdp_resume_endpoint_failed", &install, &record)
+            .await?;
         if let Err(error) =
             cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
                 .await
         {
-            let message = format!("恢复主题失败：{error}");
+            let failure = error.to_string();
+            self.spawn_cdp_failure_snapshot(
+                "cdp_resume_probe_failed",
+                failure.clone(),
+                install.clone(),
+                record.port,
+                Some(record.browser_id.clone()),
+            );
+            let message = format!("恢复主题失败：{failure}");
             self.inner.lock().await.status = status_for_record("paused", &record, &message);
             return Err(AppError::Runtime(message));
         }
@@ -933,6 +972,14 @@ impl RuntimeManager {
                                 manager
                                     .mark_watcher_error(generation, &record, &failure)
                                     .await;
+                                manager
+                                    .spawn_cdp_failure_snapshot(
+                                        "cdp_watcher_probe_failed",
+                                        failure,
+                                        install.clone(),
+                                        record.port,
+                                        Some(record.browser_id.clone()),
+                                    );
                                 break;
                             }
                         }
@@ -1098,6 +1145,85 @@ impl RuntimeManager {
     fn record_log(&self, level: &str, event: &str, message: impl Into<String>, data: Value) {
         let _ = self.log.record(level, event, message, data);
     }
+
+    async fn verify_endpoint_with_snapshot(
+        self: &Arc<Self>,
+        event: &'static str,
+        install: &CodexInstall,
+        record: &RuntimeRecord,
+    ) -> AppResult<()> {
+        match verify_endpoint(&self.http, install, record).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.spawn_cdp_failure_snapshot(
+                    event,
+                    error.to_string(),
+                    install.clone(),
+                    record.port,
+                    Some(record.browser_id.clone()),
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn spawn_cdp_failure_snapshot(
+        self: &Arc<Self>,
+        event: &'static str,
+        message: String,
+        install: CodexInstall,
+        port: u16,
+        browser_id: Option<String>,
+    ) {
+        let manager = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            manager
+                .record_cdp_failure_snapshot(event, &message, &install, port, browser_id.as_deref())
+                .await;
+        });
+    }
+
+    async fn record_cdp_failure_snapshot(
+        &self,
+        event: &str,
+        message: &str,
+        install: &CodexInstall,
+        port: u16,
+        browser_id: Option<&str>,
+    ) {
+        let snapshot = guarded_diagnostic_snapshot(&self.http, install, port, browser_id).await;
+        self.record_log(
+            "error",
+            event,
+            message,
+            json!({
+                "port": port,
+                "browserId": browser_id,
+                "snapshot": snapshot,
+            }),
+        );
+    }
+}
+
+async fn guarded_diagnostic_snapshot(
+    http: &Client,
+    install: &CodexInstall,
+    port: u16,
+    browser_id: Option<&str>,
+) -> Value {
+    match install.verify_listener_owner(port) {
+        Ok(true) => cdp::diagnostic_snapshot(http, port, browser_id).await,
+        Ok(false) => json!({
+            "port": port,
+            "stage": "listenerOwner",
+            "verifiedOwner": false,
+        }),
+        Err(error) => json!({
+            "port": port,
+            "stage": "listenerOwner",
+            "error": error.to_string(),
+        }),
+    }
 }
 
 fn record_log_data(record: &RuntimeRecord) -> Value {
@@ -1173,23 +1299,68 @@ fn select_available_port(preferred: u16) -> AppResult<u16> {
 }
 
 async fn wait_until_ready_and_apply(
-    http: &Client,
+    manager: &Arc<RuntimeManager>,
     install: &CodexInstall,
     port: u16,
     payload: &str,
 ) -> AppResult<(String, usize)> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
+    let mut last_browser_id = None;
+    let mut snapshot_browser_id = None;
+    let mut pending_snapshot: Option<JoinHandle<Value>> = None;
     while Instant::now() < deadline {
-        match cdp::browser_identity(http, port).await {
+        match cdp::browser_identity(&manager.http, port).await {
             Ok(identity) => {
-                if !install.verify_listener_owner(port)? {
-                    return Err(AppError::Runtime(
-                        "CDP 端口监听者不是已验证的官方 Codex".into(),
-                    ));
+                match install.verify_listener_owner(port) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        return Err(AppError::Runtime(
+                            "CDP 端口监听者不是已验证的官方 Codex".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        return Err(error);
+                    }
                 }
-                match cdp::apply_to_verified_targets(http, port, &identity.id, payload).await {
-                    Ok(count) if count > 0 => return Ok((identity.id, count)),
+                if snapshot_browser_id.as_deref() != Some(identity.id.as_str()) {
+                    if let Some(snapshot) = pending_snapshot.take() {
+                        snapshot.abort();
+                    }
+                    let http = manager.http.clone();
+                    let snapshot_install = install.clone();
+                    let expected_browser_id = identity.id.clone();
+                    let snapshot_at = deadline
+                        .checked_sub(READINESS_SNAPSHOT_LEAD)
+                        .unwrap_or(deadline);
+                    pending_snapshot = Some(tauri::async_runtime::spawn(async move {
+                        sleep_until(snapshot_at).await;
+                        guarded_diagnostic_snapshot(
+                            &http,
+                            &snapshot_install,
+                            port,
+                            Some(expected_browser_id.as_str()),
+                        )
+                        .await
+                    }));
+                    snapshot_browser_id = Some(identity.id.clone());
+                }
+                last_browser_id = Some(identity.id.clone());
+                match cdp::apply_to_verified_targets(&manager.http, port, &identity.id, payload)
+                    .await
+                {
+                    Ok(count) if count > 0 => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        return Ok((identity.id, count));
+                    }
                     Ok(_) => last_error = "Codex 渲染页尚未完成 DOM 初始化".into(),
                     Err(error) => last_error = error.to_string(),
                 }
@@ -1198,6 +1369,42 @@ async fn wait_until_ready_and_apply(
         }
         sleep(Duration::from_millis(350)).await;
     }
+    let manager = Arc::clone(manager);
+    let diagnostic_install = install.clone();
+    let diagnostic_browser_id = last_browser_id.clone();
+    let diagnostic_error = last_error.clone();
+    tauri::async_runtime::spawn(async move {
+        let snapshot = match pending_snapshot {
+            Some(snapshot) => snapshot.await.unwrap_or_else(|error| {
+                json!({
+                    "port": port,
+                    "stage": "snapshotTask",
+                    "error": error.to_string(),
+                })
+            }),
+            None => {
+                guarded_diagnostic_snapshot(
+                    &manager.http,
+                    &diagnostic_install,
+                    port,
+                    diagnostic_browser_id.as_deref(),
+                )
+                .await
+            }
+        };
+        manager.record_log(
+            "error",
+            "cdp_readiness_timeout",
+            format!(
+                "Codex renderer did not become injectable before the deadline: {diagnostic_error}"
+            ),
+            json!({
+                "port": port,
+                "browserId": diagnostic_browser_id,
+                "snapshot": snapshot,
+            }),
+        );
+    });
     Err(AppError::Runtime(format!(
         "等待 Codex CDP 与主题注入超时：{last_error}"
     )))

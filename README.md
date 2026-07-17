@@ -17,6 +17,17 @@
   非 OpenAI 官方产品。不修改 <code>.app</code> / <code>app.asar</code> / WindowsApps。
 </p>
 
+## 下载 LumaDrobe 桌面客户端
+
+前往 **[GitHub Releases](https://github.com/yuebanddd/Codex-Dream-Skin/releases)**，展开最新版本的 **Assets**，按系统下载：
+
+| 系统                | 安装包文件名                              |
+| ------------------- | ----------------------------------------- |
+| Windows x64         | `LumaDrobe-v<版本>-Windows-x64-Setup.exe` |
+| macOS Apple Silicon | `LumaDrobe-v<版本>-macOS-arm64.dmg`       |
+
+当前安装包是未签名预览版。每个平台同时提供 `BUILD-INFO.json` 和 `SHA256SUMS.txt`，用于核对构建提交和安装包哈希。
+
 ## 赞助商
 
 <p align="center">
