@@ -14,6 +14,9 @@ use url::Url;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(4);
+const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
+const DIAGNOSTIC_PROBE_LIMIT: usize = 8;
 
 const PROBE_EXPRESSION: &str = r#"(() => {
   const clip = (value, limit = 80) => typeof value === 'string' ? value.slice(0, limit) : null;
@@ -240,6 +243,27 @@ pub async fn diagnostic_snapshot(
     port: u16,
     expected_browser_id: Option<&str>,
 ) -> Value {
+    match timeout(
+        DIAGNOSTIC_TIMEOUT,
+        collect_diagnostic_snapshot(client, port, expected_browser_id),
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => json!({
+            "port": port,
+            "stage": "snapshotTimeout",
+            "timeoutMs": DIAGNOSTIC_TIMEOUT.as_millis(),
+            "bounded": true,
+        }),
+    }
+}
+
+async fn collect_diagnostic_snapshot(
+    client: &Client,
+    port: u16,
+    expected_browser_id: Option<&str>,
+) -> Value {
     let identity = match browser_identity(client, port).await {
         Ok(identity) => identity,
         Err(error) => {
@@ -284,7 +308,8 @@ pub async fn diagnostic_snapshot(
         .filter(|target| valid_page_target(target, port))
         .count();
     let mut reports = Vec::new();
-    for target in targets.into_iter().take(32) {
+    let mut probed_targets = 0;
+    for target in targets.into_iter().take(DIAGNOSTIC_TARGET_LIMIT) {
         let eligible = valid_page_target(&target, port);
         let mut report = json!({
             "targetId": target.id,
@@ -292,11 +317,14 @@ pub async fn diagnostic_snapshot(
             "location": safe_target_location(&target.url),
             "eligible": eligible,
         });
-        if eligible {
+        if eligible && probed_targets < DIAGNOSTIC_PROBE_LIMIT {
+            probed_targets += 1;
             match evaluate_many(&target, port, &[PROBE_EXPRESSION]).await {
                 Ok(values) => report["probe"] = values.into_iter().next().unwrap_or(Value::Null),
                 Err(error) => report["probeError"] = Value::String(error.to_string()),
             }
+        } else if eligible {
+            report["probeSkipped"] = Value::String("diagnosticProbeLimit".into());
         }
         reports.push(report);
     }
@@ -309,6 +337,9 @@ pub async fn diagnostic_snapshot(
         "pageTargets": page_targets,
         "eligibleTargets": eligible_targets,
         "reportedTargets": reports.len(),
+        "probedTargets": probed_targets,
+        "targetLimit": DIAGNOSTIC_TARGET_LIMIT,
+        "probeLimit": DIAGNOSTIC_PROBE_LIMIT,
         "targets": reports,
     })
 }
@@ -599,6 +630,9 @@ mod tests {
     fn diagnostic_probe_is_bounded_and_content_free() {
         assert!(PROBE_EXPRESSION.contains("slice(0, 24)"));
         assert!(PROBE_EXPRESSION.contains("elementCount"));
+        assert_eq!(DIAGNOSTIC_TIMEOUT, Duration::from_secs(4));
+        assert_eq!(DIAGNOSTIC_TARGET_LIMIT, 16);
+        assert_eq!(DIAGNOSTIC_PROBE_LIMIT, 8);
         for forbidden in [
             "innerText",
             "textContent",
