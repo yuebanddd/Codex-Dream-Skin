@@ -525,13 +525,13 @@ fn theme_install_is_confirmed(value: Option<&Value>) -> bool {
         "artAttached",
         "chromeAttached",
     ]
-        .into_iter()
-        .all(|field| {
-            result
-                .and_then(|value| value.get(field))
-                .and_then(Value::as_bool)
-                == Some(true)
-        })
+    .into_iter()
+    .all(|field| {
+        result
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_bool)
+            == Some(true)
+    })
 }
 
 fn theme_health_expression(theme_key: &str) -> AppResult<String> {
