@@ -313,7 +313,9 @@ mod tests {
         assert!(payload.contains("styleAttached"));
         assert!(payload.contains("rootTagged"));
         assert!(payload.contains("artAttached"));
-        let appearance = payload.find("const initialShellMode = detectShellMode()").unwrap();
+        let appearance = payload
+            .find("const initialShellMode = detectShellMode()")
+            .unwrap();
         let mutation = payload.find("root.classList.add(...ROOT_CLASSES)").unwrap();
         assert!(appearance < mutation);
         std::fs::remove_dir_all(root).unwrap();
