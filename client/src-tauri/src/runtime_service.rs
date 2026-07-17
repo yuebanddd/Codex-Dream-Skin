@@ -186,13 +186,12 @@ impl RuntimeManager {
             cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
                 .await
         {
-            self.record_cdp_failure_snapshot(
+            self.spawn_cdp_failure_snapshot(
                 "cdp_recovery_probe_failed",
-                &error.to_string(),
+                error.to_string(),
                 record.port,
-                &record.browser_id,
-            )
-            .await;
+                record.browser_id.clone(),
+            );
             return Err(error);
         }
         self.start_watcher(record.clone(), install, None, payload)
@@ -300,20 +299,20 @@ impl RuntimeManager {
             {
                 Ok(count) => count,
                 Err(error) => {
-                    self.record_cdp_failure_snapshot(
+                    let failure = error.to_string();
+                    self.spawn_cdp_failure_snapshot(
                         "cdp_apply_probe_failed",
-                        &error.to_string(),
+                        failure.clone(),
                         active.port,
-                        &active.browser_id,
-                    )
-                    .await;
+                        active.browser_id.clone(),
+                    );
                     return self
                         .fail_apply_attempt(
                             &installed,
                             Some(active),
                             Some(install),
                             previous_child,
-                            error.to_string(),
+                            failure,
                         )
                         .await;
                 }
@@ -622,14 +621,14 @@ impl RuntimeManager {
             cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
                 .await
         {
-            self.record_cdp_failure_snapshot(
+            let failure = error.to_string();
+            self.spawn_cdp_failure_snapshot(
                 "cdp_resume_probe_failed",
-                &error.to_string(),
+                failure.clone(),
                 record.port,
-                &record.browser_id,
-            )
-            .await;
-            let message = format!("恢复主题失败：{error}");
+                record.browser_id.clone(),
+            );
+            let message = format!("恢复主题失败：{failure}");
             self.inner.lock().await.status = status_for_record("paused", &record, &message);
             return Err(AppError::Runtime(message));
         }
