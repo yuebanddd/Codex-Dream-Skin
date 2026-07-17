@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::async_runtime::JoinHandle;
 use tokio::sync::{watch, Mutex};
-use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, Instant};
 
 const RUNTIME_SCHEMA: u32 = 1;
