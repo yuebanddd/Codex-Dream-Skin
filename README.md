@@ -108,10 +108,10 @@
 
 仓库内按平台放了现成脚本（实现细节不同，效果都是「主题化 Codex」）：
 
-| 平台                      | 目录                     | 入口                                                      |
-| ------------------------- | ------------------------ | --------------------------------------------------------- |
-| Apple Silicon / Intel Mac | [`macos/`](./macos/)     | 双击 `Install Codex Dream Skin.command`                   |
-| Windows                   | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
+| 平台 | 目录 | 入口 |
+|------|------|------|
+| Apple Silicon / Intel Mac | [`macos/`](./macos/) | 双击 `Install Codex Dream Skin.command` |
+| Windows | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
 
 更细的说明：
 
