@@ -97,7 +97,10 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
     if (/\b(light|theme-light|appearance-light)\b/.test(classes)) return "light";
     const declared = (root?.getAttribute("data-theme") ||
       root?.getAttribute("data-appearance") ||
-      root?.getAttribute("data-color-mode") || "").toLowerCase();
+      root?.getAttribute("data-color-mode") ||
+      document.body?.getAttribute("data-theme") ||
+      document.body?.getAttribute("data-appearance") ||
+      document.body?.getAttribute("data-color-mode") || "").toLowerCase();
     if (declared.includes("dark")) return "dark";
     if (declared.includes("light")) return "light";
     if (declared.includes("system")) return "system";
@@ -373,6 +376,7 @@ mod tests {
         assert!(appearance < mutation);
         assert!(payload.contains("root.setAttribute(\"data-dream-shell\", refreshShellMode())"));
         assert!(payload.contains("mediaQuery.addEventListener(\"change\", mediaHandler)"));
+        assert!(payload.contains("document.body?.getAttribute(\"data-theme\")"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
