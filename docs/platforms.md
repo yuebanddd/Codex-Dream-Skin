@@ -26,6 +26,7 @@ LumaDrobe Desktop（React + Rust）
 - 恢复操作在重新验证应用、监听者与浏览器 ID 后才关闭并重启 Codex
 - 暂停操作先持久化暂停意图并等待重注入 watcher 退出，再从已验证页面移除主题
 - 运行诊断只执行身份、进程与 CDP 只读检查，不修改 Codex 或主题状态
+- CDP 或 DOM 兼容失败时自动写入受限结构指纹，不记录页面文本、表单值、标题、查询参数或存储内容
 - Windows 的系统身份检查由客户端内部执行，辅助进程使用无控制台窗口模式，不依赖外置脚本
 - 不修改官方应用包、`app.asar`、代码签名、API Key、Base URL 或 `~/.codex/config.toml`
 

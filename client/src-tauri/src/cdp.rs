@@ -16,16 +16,39 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const PROBE_EXPRESSION: &str = r#"(() => {
+  const clip = (value, limit = 80) => typeof value === 'string' ? value.slice(0, limit) : null;
+  const describe = (node) => ({
+    tag: node.tagName?.toLowerCase() ?? null,
+    id: clip(node.id),
+    role: clip(node.getAttribute?.('role')),
+    testId: clip(node.getAttribute?.('data-testid')),
+    classes: Array.from(node.classList ?? []).slice(0, 8).map((value) => clip(value, 64)),
+  });
   const markers = {
     shell: Boolean(document.querySelector('main.main-surface')),
     sidebar: Boolean(document.querySelector('aside.app-shell-left-panel')),
     composer: Boolean(document.querySelector('.composer-surface-chrome')),
     main: Boolean(document.querySelector('[role="main"]')),
   };
+  const landmarks = Array.from(document.querySelectorAll(
+    'main,aside,nav,header,[role="main"],[role="navigation"],[data-testid]'
+  )).slice(0, 24).map(describe);
   return {
     codex: location.protocol === 'app:' && markers.shell && markers.sidebar &&
       (markers.composer || markers.main),
+    document: {
+      protocol: location.protocol,
+      pathname: clip(location.pathname, 160),
+      readyState: document.readyState,
+      hasDocumentElement: Boolean(document.documentElement),
+      hasHead: Boolean(document.head),
+      hasBody: Boolean(document.body),
+      elementCount: document.getElementsByTagName('*').length,
+      root: document.documentElement ? describe(document.documentElement) : null,
+      body: document.body ? describe(document.body) : null,
+    },
     markers,
+    landmarks,
   };
 })()"#;
 
@@ -210,6 +233,86 @@ pub async fn verified_targets(
         .collect())
 }
 
+/// Collects a bounded, content-free renderer fingerprint for persistent failure logs.
+/// It intentionally excludes text, form values, storage, query strings and page titles.
+pub async fn diagnostic_snapshot(
+    client: &Client,
+    port: u16,
+    expected_browser_id: Option<&str>,
+) -> Value {
+    let identity = match browser_identity(client, port).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            return json!({
+                "port": port,
+                "stage": "browserIdentity",
+                "error": error.to_string(),
+            });
+        }
+    };
+    let identity_matches = expected_browser_id
+        .map(|expected| expected == identity.id)
+        .unwrap_or(true);
+    if !identity_matches {
+        return json!({
+            "port": port,
+            "stage": "browserIdentity",
+            "browserId": identity.id,
+            "identityMatches": false,
+        });
+    }
+
+    let targets: Vec<CdpTarget> = match fetch_json(client, port, "/json/list").await {
+        Ok(targets) => targets,
+        Err(error) => {
+            return json!({
+                "port": port,
+                "stage": "targetList",
+                "browserId": identity.id,
+                "identityMatches": true,
+                "error": error.to_string(),
+            });
+        }
+    };
+    let total_targets = targets.len();
+    let page_targets = targets
+        .iter()
+        .filter(|target| target.target_type == "page")
+        .count();
+    let eligible_targets = targets
+        .iter()
+        .filter(|target| valid_page_target(target, port))
+        .count();
+    let mut reports = Vec::new();
+    for target in targets.into_iter().take(32) {
+        let eligible = valid_page_target(&target, port);
+        let mut report = json!({
+            "targetId": target.id,
+            "targetType": target.target_type,
+            "location": safe_target_location(&target.url),
+            "eligible": eligible,
+        });
+        if eligible {
+            match evaluate_many(&target, port, &[PROBE_EXPRESSION]).await {
+                Ok(values) => report["probe"] = values.into_iter().next().unwrap_or(Value::Null),
+                Err(error) => report["probeError"] = Value::String(error.to_string()),
+            }
+        }
+        reports.push(report);
+    }
+    json!({
+        "port": port,
+        "stage": "rendererProbe",
+        "browserId": identity.id,
+        "identityMatches": true,
+        "totalTargets": total_targets,
+        "pageTargets": page_targets,
+        "eligibleTargets": eligible_targets,
+        "reportedTargets": reports.len(),
+        "targets": reports,
+    })
+}
+
 pub async fn apply_to_verified_targets(
     client: &Client,
     port: u16,
@@ -378,6 +481,17 @@ fn valid_page_target(target: &CdpTarget, port: u16) -> bool {
         && validated_page_url(target, port).is_ok()
 }
 
+fn safe_target_location(raw: &str) -> Value {
+    match Url::parse(raw) {
+        Ok(url) => json!({
+            "scheme": url.scheme(),
+            "host": url.host_str().map(|value| value.chars().take(80).collect::<String>()),
+            "path": url.path().chars().take(160).collect::<String>(),
+        }),
+        Err(_) => json!({ "scheme": "invalid" }),
+    }
+}
+
 fn validated_page_url(target: &CdpTarget, port: u16) -> AppResult<Url> {
     let url = validated_debugger_url(&target.web_socket_debugger_url, port, "page")?;
     if url.path() != format!("/devtools/page/{}", target.id) {
@@ -479,5 +593,36 @@ mod tests {
         assert!(expression.contains("source:night@1.0.0"));
         assert!(expression.contains("state.ensure()"));
         assert!(!expression.contains("data:image"));
+    }
+
+    #[test]
+    fn diagnostic_probe_is_bounded_and_content_free() {
+        assert!(PROBE_EXPRESSION.contains("slice(0, 24)"));
+        assert!(PROBE_EXPRESSION.contains("elementCount"));
+        for forbidden in [
+            "innerText",
+            "textContent",
+            "innerHTML",
+            "outerHTML",
+            "localStorage",
+            "sessionStorage",
+            "document.title",
+            ".value",
+        ] {
+            assert!(
+                !PROBE_EXPRESSION.contains(forbidden),
+                "diagnostic probe must not capture {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_target_location_drops_query_and_fragment() {
+        let location = safe_target_location("app://codex/home?secret=value#private");
+        assert_eq!(location["scheme"], "app");
+        assert_eq!(location["host"], "codex");
+        assert_eq!(location["path"], "/home");
+        assert!(location.get("query").is_none());
+        assert!(location.get("fragment").is_none());
     }
 }

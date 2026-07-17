@@ -182,8 +182,19 @@ impl RuntimeManager {
             );
             return Ok(());
         }
-        cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
-            .await?;
+        if let Err(error) =
+            cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
+                .await
+        {
+            self.record_cdp_failure_snapshot(
+                "cdp_recovery_probe_failed",
+                &error.to_string(),
+                record.port,
+                &record.browser_id,
+            )
+            .await;
+            return Err(error);
+        }
         self.start_watcher(record.clone(), install, None, payload)
             .await;
         Ok(())
@@ -289,6 +300,13 @@ impl RuntimeManager {
             {
                 Ok(count) => count,
                 Err(error) => {
+                    self.record_cdp_failure_snapshot(
+                        "cdp_apply_probe_failed",
+                        &error.to_string(),
+                        active.port,
+                        &active.browser_id,
+                    )
+                    .await;
                     return self
                         .fail_apply_attempt(
                             &installed,
@@ -465,7 +483,8 @@ impl RuntimeManager {
                 codex_identity: install.identity.clone(),
                 paused: false,
             };
-            let ready = wait_until_ready_and_apply(&self.http, &install, port, &payload).await;
+            let ready =
+                wait_until_ready_and_apply(&self.http, &install, port, &payload, &self.log).await;
             let (browser_id, applied_targets) = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
@@ -603,6 +622,13 @@ impl RuntimeManager {
             cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
                 .await
         {
+            self.record_cdp_failure_snapshot(
+                "cdp_resume_probe_failed",
+                &error.to_string(),
+                record.port,
+                &record.browser_id,
+            )
+            .await;
             let message = format!("恢复主题失败：{error}");
             self.inner.lock().await.status = status_for_record("paused", &record, &message);
             return Err(AppError::Runtime(message));
@@ -931,6 +957,14 @@ impl RuntimeManager {
                             if failures >= 3 {
                                 let failure = error.to_string();
                                 manager
+                                    .record_cdp_failure_snapshot(
+                                        "cdp_watcher_probe_failed",
+                                        &failure,
+                                        record.port,
+                                        &record.browser_id,
+                                    )
+                                    .await;
+                                manager
                                     .mark_watcher_error(generation, &record, &failure)
                                     .await;
                                 break;
@@ -1098,6 +1132,26 @@ impl RuntimeManager {
     fn record_log(&self, level: &str, event: &str, message: impl Into<String>, data: Value) {
         let _ = self.log.record(level, event, message, data);
     }
+
+    async fn record_cdp_failure_snapshot(
+        &self,
+        event: &str,
+        message: &str,
+        port: u16,
+        browser_id: &str,
+    ) {
+        let snapshot = cdp::diagnostic_snapshot(&self.http, port, Some(browser_id)).await;
+        self.record_log(
+            "error",
+            event,
+            message,
+            json!({
+                "port": port,
+                "browserId": browser_id,
+                "snapshot": snapshot,
+            }),
+        );
+    }
 }
 
 fn record_log_data(record: &RuntimeRecord) -> Value {
@@ -1177,12 +1231,15 @@ async fn wait_until_ready_and_apply(
     install: &CodexInstall,
     port: u16,
     payload: &str,
+    log: &RuntimeLog,
 ) -> AppResult<(String, usize)> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
+    let mut last_browser_id = None;
     while Instant::now() < deadline {
         match cdp::browser_identity(http, port).await {
             Ok(identity) => {
+                last_browser_id = Some(identity.id.clone());
                 if !install.verify_listener_owner(port)? {
                     return Err(AppError::Runtime(
                         "CDP 端口监听者不是已验证的官方 Codex".into(),
@@ -1198,6 +1255,17 @@ async fn wait_until_ready_and_apply(
         }
         sleep(Duration::from_millis(350)).await;
     }
+    let snapshot = cdp::diagnostic_snapshot(http, port, last_browser_id.as_deref()).await;
+    let _ = log.record(
+        "error",
+        "cdp_readiness_timeout",
+        "Codex renderer did not become injectable before the deadline",
+        json!({
+            "port": port,
+            "lastError": last_error.clone(),
+            "snapshot": snapshot,
+        }),
+    );
     Err(AppError::Runtime(format!(
         "等待 Codex CDP 与主题注入超时：{last_error}"
     )))

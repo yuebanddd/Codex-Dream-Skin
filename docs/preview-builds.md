@@ -19,7 +19,13 @@ v0.5 的目标是让 LumaDrobe 可以在真实 macOS 和 Windows 环境中安装
 
 PR、`release` 分支 push 和手动 `workflow_dispatch` 都会构建测试包，且不使用 npm 依赖缓存。三个平台完成后还会在独立的 release gate 中汇总并复验发布资产；Artifact 保留 14 天。
 
-每次 PR 合并到 `release` 后，工作流会在三个平台构建全部成功并重新校验版本、提交和 SHA-256 后，自动创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。Pre-release 直接提供 DMG、NSIS EXE，以及按平台命名的 `BUILD-INFO.json` 和 `SHA256SUMS.txt`。同一工作流重跑时会覆盖原 tag 的资产，不会创建重复版本。
+每次 PR 合并到 `release` 后，工作流会在三个平台构建全部成功并重新校验版本、提交和 SHA-256 后，自动创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。Release 正文会列出下载说明，Assets 中的安装包使用可直接识别的平台文件名：
+
+- `LumaDrobe-v<版本>-Windows-x64-Setup.exe`
+- `LumaDrobe-v<版本>-macOS-arm64.dmg`
+- `LumaDrobe-v<版本>-macOS-x64.dmg`
+
+每个平台还提供对应的 `BUILD-INFO.json` 和 `SHA256SUMS.txt`。同一工作流重跑时会覆盖原 tag 的资产和说明，不会创建重复版本。
 
 ## 校验下载内容
 
@@ -59,6 +65,6 @@ Get-Content .\SHA256SUMS.txt
 5. 退出并重开 LumaDrobe，确认运行或暂停状态恢复。
 6. 恢复原生并重启 Codex。
 
-如有问题，先打开“运行诊断”。页面会显示持久运行日志 `runtime.jsonl` 的完整路径；日志达到 1 MiB 后轮换为同目录的 `runtime.previous.jsonl`。请将诊断 JSON 和与问题对应的日志一起反馈。
+如有问题，直接提供持久运行日志 `runtime.jsonl`；无需再手动导出诊断 JSON。日志达到 1 MiB 后轮换为同目录的 `runtime.previous.jsonl`。运行诊断页面会显示日志的完整路径。
 
-日志只记录客户端版本、构建提交、主题标识、Codex/CDP 身份、路径、端口、目标数量和错误，不写入主题 CSS/图片、API Key、`auth.json` 或对话内容。macOS/Linux 日志文件固定为仅所有者可读写的 `0600`；诊断与日志仍可能包含本机路径和 CDP 目标标识，公开提交前请先检查并移除不希望披露的信息。
+日志自动记录客户端版本、构建提交、主题标识、Codex/CDP 身份、路径、端口、目标数量、失败阶段，以及受数量和长度限制的 DOM 结构指纹。结构指纹只包含标签名、元素 ID、角色、测试 ID、class 名和布尔标记；不采集页面标题、文本、表单值、URL 查询参数、存储内容或对话。日志也不写入主题 CSS/图片、API Key 或 `auth.json`。macOS/Linux 日志文件固定为仅所有者可读写的 `0600`；日志仍可能包含本机路径和 CDP 目标标识，公开提交前请先检查并移除不希望披露的信息。

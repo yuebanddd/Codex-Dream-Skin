@@ -86,6 +86,7 @@ jobs:
       LUMADROBE_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,8 +121,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release_gate.outputs.tag }}
+          VERSION: ${{ needs.release_gate.outputs.version }}
         shell: bash
         run: |
+          cat > release-notes.md <<EOF
+          ## 下载
+
+          - Windows x64：\`LumaDrobe-v${VERSION}-Windows-x64-Setup.exe\`
+          - macOS Apple Silicon：\`LumaDrobe-v${VERSION}-macOS-arm64.dmg\`
+          - macOS Intel：\`LumaDrobe-v${VERSION}-macOS-x64.dmg\`
+
+          这是由 release 提交 \`${GITHUB_SHA}\` 自动构建的未签名预览版。安装前可使用同平台的 \`SHA256SUMS.txt\` 校验文件。
+          EOF
           if gh release view "$TAG" >/dev/null 2>&1; then
             EXISTING_TARGET=$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)
             if [ "$EXISTING_TARGET" != "$GITHUB_SHA" ]; then
@@ -129,11 +140,12 @@ jobs:
               exit 1
             fi
             gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
           else
             gh release create "$TAG" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "LumaDrobe $TAG" \
-              --notes "Automated unsigned preview build from release commit $GITHUB_SHA. Verify the platform SHA256SUMS file before installation." \
+              --notes-file release-notes.md \
               --prerelease \
               --latest=false
           fi

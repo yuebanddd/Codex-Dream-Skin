@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Activity,
   Check,
@@ -7,6 +8,7 @@ import {
   CirclePlay,
   Download,
   FileJson,
+  FolderOpen,
   GalleryVerticalEnd,
   Github,
   Import,
@@ -181,6 +183,16 @@ function App() {
       setWorking(null);
     }
   }, []);
+
+  const handleRevealRuntimeLog = useCallback(async () => {
+    if (!diagnostics) return;
+    setError("");
+    try {
+      await revealItemInDir(diagnostics.logPath);
+    } catch (reason) {
+      setError(`无法打开运行日志位置：${String(reason)}`);
+    }
+  }, [diagnostics]);
 
   useEffect(() => {
     if (view === "diagnostics") void refreshDiagnostics();
@@ -431,6 +443,7 @@ function App() {
             exportPath={diagnosticExportPath}
             onRefresh={refreshDiagnostics}
             onExport={handleExportDiagnostics}
+            onRevealLog={handleRevealRuntimeLog}
           />
         )}
       </main>
@@ -966,6 +979,7 @@ function DiagnosticsView({
   exportPath,
   onRefresh,
   onExport,
+  onRevealLog,
 }: {
   diagnostics: RuntimeDiagnostics | null;
   loading: boolean;
@@ -973,6 +987,7 @@ function DiagnosticsView({
   exportPath: string;
   onRefresh: () => Promise<void>;
   onExport: () => Promise<void>;
+  onRevealLog: () => Promise<void>;
 }) {
   const stateLabel = (value?: boolean) =>
     value === undefined ? "未检查" : value ? "通过" : "失败";
@@ -987,6 +1002,13 @@ function DiagnosticsView({
           <p>只读检查 Codex 安装、进程身份、回环监听和渲染器会话。</p>
         </div>
         <div className="diagnostics-actions">
+          <button
+            disabled={loading || !diagnostics}
+            onClick={() => void onRevealLog()}
+          >
+            <FolderOpen />
+            打开日志位置
+          </button>
           <button
             disabled={loading || exporting || !diagnostics}
             onClick={() => void onExport()}
@@ -1084,7 +1106,8 @@ function DiagnosticsView({
               检查时间：{new Date(diagnostics.generatedAt).toLocaleString()}
             </small>
             <small>
-              导出文件和运行日志会包含本机路径、主题标识与 CDP
+              失败上下文会自动写入运行日志，无需手动导出诊断
+              JSON。日志包含本机路径、 主题标识与 CDP
               目标标识，请在公开分享前检查内容。
             </small>
             {exportPath && <code>已导出：{exportPath}</code>}

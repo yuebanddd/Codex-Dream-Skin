@@ -40,7 +40,7 @@ pub fn run() {
                 data_dir.join("installed-skins.json"),
             )?));
             let http = Client::builder()
-                .user_agent("LumaDrobe/0.5.1")
+                .user_agent(concat!("LumaDrobe/", env!("CARGO_PKG_VERSION")))
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::limited(3))
                 .build()?;
