@@ -1253,28 +1253,58 @@ async fn wait_until_ready_and_apply(
     while Instant::now() < deadline {
         match cdp::browser_identity(&manager.http, port).await {
             Ok(identity) => {
+                match install.verify_listener_owner(port) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        return Err(AppError::Runtime(
+                            "CDP 端口监听者不是已验证的官方 Codex".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        return Err(error);
+                    }
+                }
                 if snapshot_browser_id.as_deref() != Some(identity.id.as_str()) {
                     if let Some(snapshot) = pending_snapshot.take() {
                         snapshot.abort();
                     }
                     let http = manager.http.clone();
+                    let snapshot_install = install.clone();
                     let expected_browser_id = identity.id.clone();
                     let snapshot_at = deadline
                         .checked_sub(READINESS_SNAPSHOT_LEAD)
                         .unwrap_or(deadline);
                     pending_snapshot = Some(tauri::async_runtime::spawn(async move {
                         sleep_until(snapshot_at).await;
+                        match snapshot_install.verify_listener_owner(port) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return json!({
+                                    "port": port,
+                                    "stage": "listenerOwner",
+                                    "verifiedOwner": false,
+                                });
+                            }
+                            Err(error) => {
+                                return json!({
+                                    "port": port,
+                                    "stage": "listenerOwner",
+                                    "error": error.to_string(),
+                                });
+                            }
+                        }
                         cdp::diagnostic_snapshot(&http, port, Some(expected_browser_id.as_str()))
                             .await
                     }));
                     snapshot_browser_id = Some(identity.id.clone());
                 }
                 last_browser_id = Some(identity.id.clone());
-                if !install.verify_listener_owner(port)? {
-                    return Err(AppError::Runtime(
-                        "CDP 端口监听者不是已验证的官方 Codex".into(),
-                    ));
-                }
                 match cdp::apply_to_verified_targets(&manager.http, port, &identity.id, payload)
                     .await
                 {
