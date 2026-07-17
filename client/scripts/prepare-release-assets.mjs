@@ -40,11 +40,6 @@ const platforms = [
     releaseName: `LumaDrobe-v${version}-macOS-arm64.dmg`,
   },
   {
-    artifact: "LumaDrobe-macOS-x64",
-    extension: ".dmg",
-    releaseName: `LumaDrobe-v${version}-macOS-x64.dmg`,
-  },
-  {
     artifact: "LumaDrobe-Windows-x64",
     extension: ".exe",
     releaseName: `LumaDrobe-v${version}-Windows-x64-Setup.exe`,

@@ -29,10 +29,6 @@ jobs:
             os: macos-15
             bundle: dmg
             artifact: LumaDrobe-macOS-arm64
-          - name: macOS DMG (x64)
-            os: macos-15-intel
-            bundle: dmg
-            artifact: LumaDrobe-macOS-x64
           - name: Windows NSIS (x64)
             os: windows-2025
             bundle: nsis
@@ -129,8 +125,6 @@ jobs:
 
           - Windows x64：\`LumaDrobe-v${VERSION}-Windows-x64-Setup.exe\`
           - macOS Apple Silicon：\`LumaDrobe-v${VERSION}-macOS-arm64.dmg\`
-          - macOS Intel：\`LumaDrobe-v${VERSION}-macOS-x64.dmg\`
-
           这是由 release 提交 \`${GITHUB_SHA}\` 自动构建的未签名预览版。安装前可使用同平台的 \`SHA256SUMS.txt\` 校验文件。
           EOF
           if gh release view "$TAG" >/dev/null 2>&1; then

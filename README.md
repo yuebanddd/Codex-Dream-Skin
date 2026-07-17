@@ -25,7 +25,6 @@
 | ------------------- | ----------------------------------------- |
 | Windows x64         | `LumaDrobe-v<版本>-Windows-x64-Setup.exe` |
 | macOS Apple Silicon | `LumaDrobe-v<版本>-macOS-arm64.dmg`       |
-| macOS Intel         | `LumaDrobe-v<版本>-macOS-x64.dmg`         |
 
 当前安装包是未签名预览版。每个平台同时提供 `BUILD-INFO.json` 和 `SHA256SUMS.txt`，用于核对构建提交和安装包哈希。
 

@@ -6,24 +6,22 @@ v0.5 的目标是让 LumaDrobe 可以在真实 macOS 和 Windows 环境中安装
 
 `Preview packages` GitHub Actions 工作流生成三个 Artifact：
 
-| Artifact                | Runner           | 安装包   |
-| ----------------------- | ---------------- | -------- |
-| `LumaDrobe-macOS-arm64` | `macos-15`       | DMG      |
-| `LumaDrobe-macOS-x64`   | `macos-15-intel` | DMG      |
-| `LumaDrobe-Windows-x64` | `windows-2025`   | NSIS EXE |
+| Artifact                | Runner         | 安装包   |
+| ----------------------- | -------------- | -------- |
+| `LumaDrobe-macOS-arm64` | `macos-15`     | DMG      |
+| `LumaDrobe-Windows-x64` | `windows-2025` | NSIS EXE |
 
 每个 Artifact 还包含：
 
 - `BUILD-INFO.json`：版本、构建提交、平台、架构、文件大小和哈希
 - `SHA256SUMS.txt`：安装包 SHA-256
 
-PR、`release` 分支 push 和手动 `workflow_dispatch` 都会构建测试包，且不使用 npm 依赖缓存。三个平台完成后还会在独立的 release gate 中汇总并复验发布资产；Artifact 保留 14 天。
+PR、`release` 分支 push 和手动 `workflow_dispatch` 都会构建测试包，且不使用 npm 依赖缓存。macOS arm64 与 Windows x64 完成后还会在独立的 release gate 中汇总并复验发布资产；Artifact 保留 14 天。
 
-每次 PR 合并到 `release` 后，工作流会在三个平台构建全部成功并重新校验版本、提交和 SHA-256 后，自动创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。Release 正文会列出下载说明，Assets 中的安装包使用可直接识别的平台文件名：
+每次 PR 合并到 `release` 后，工作流会在两个目标平台构建全部成功并重新校验版本、提交和 SHA-256 后，自动创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。Release 正文会列出下载说明，Assets 中的安装包使用可直接识别的平台文件名：
 
 - `LumaDrobe-v<版本>-Windows-x64-Setup.exe`
 - `LumaDrobe-v<版本>-macOS-arm64.dmg`
-- `LumaDrobe-v<版本>-macOS-x64.dmg`
 
 每个平台还提供对应的 `BUILD-INFO.json` 和 `SHA256SUMS.txt`。同一工作流重跑时会覆盖原 tag 的资产和说明，不会创建重复版本。
 
