@@ -18,17 +18,17 @@ html.lumadrobe-theme {
 html.lumadrobe-theme body {
   background: #090b10 var(--lumadrobe-art) center / cover fixed no-repeat !important;
 }
-html.lumadrobe-theme aside.app-shell-left-panel {
+html.lumadrobe-theme aside {
   background: linear-gradient(180deg, rgba(12, 13, 19, .96), rgba(12, 13, 19, .88)) !important;
   border-color: var(--lumadrobe-line) !important;
   backdrop-filter: blur(18px) saturate(112%) !important;
 }
-html.lumadrobe-theme main.main-surface {
+html.lumadrobe-theme main {
   background:
     linear-gradient(115deg, rgba(8, 10, 15, .94) 0%, rgba(8, 10, 15, .70) 42%, rgba(8, 10, 15, .22) 100%),
     var(--lumadrobe-art) center / cover no-repeat !important;
 }
-html.lumadrobe-theme main.main-surface [role="main"] {
+html.lumadrobe-theme [role="main"] {
   background: transparent !important;
 }
 html.lumadrobe-theme .composer-surface-chrome {
@@ -73,10 +73,12 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
         r#"((theme, cssText, artDataUrl) => {{
   const STATE_KEY = "__LUMADROBE_RUNTIME__";
   const STYLE_ID = "lumadrobe-theme-style";
+  const ROOT_CLASSES = ["lumadrobe-theme", "codex-dream-skin"];
+  const ART_PROPERTIES = ["--lumadrobe-art", "--dream-art", "--dream-skin-art"];
   const previous = window[STATE_KEY];
-  if (previous?.themeKey === theme.key && previous?.ensure) {{
+  if (previous?.themeKey === theme.key && previous?.ensure && previous?.status) {{
     previous.ensure();
-    return {{ installed: true, themeKey: theme.key, reused: true }};
+    return {{ ...previous.status?.(), themeKey: theme.key, reused: true }};
   }}
   previous?.cleanup?.();
 
@@ -88,12 +90,35 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   const artUrl = URL.createObjectURL(new Blob([bytes], {{ type: mime }}));
   const touched = new Set();
 
+  const detectShellMode = () => {{
+    const root = document.documentElement;
+    const classes = `${{root?.className || ""}} ${{document.body?.className || ""}}`.toLowerCase();
+    if (/\b(dark|theme-dark|appearance-dark)\b/.test(classes)) return "dark";
+    if (/\b(light|theme-light|appearance-light)\b/.test(classes)) return "light";
+    const declared = (root?.getAttribute("data-theme") ||
+      root?.getAttribute("data-appearance") ||
+      root?.getAttribute("data-color-mode") || "").toLowerCase();
+    if (declared.includes("dark")) return "dark";
+    if (declared.includes("light")) return "light";
+    try {{
+      const scheme = getComputedStyle(root).colorScheme || "";
+      if (scheme.includes("dark") && !scheme.includes("light")) return "dark";
+      if (scheme.includes("light") && !scheme.includes("dark")) return "light";
+      return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }} catch {{
+      return "light";
+    }}
+  }};
+
   const ensure = () => {{
     const root = document.documentElement;
     if (!root) return;
-    root.classList.add("lumadrobe-theme");
+    root.classList.add(...ROOT_CLASSES);
     root.dataset.lumadrobeTheme = theme.key;
-    root.style.setProperty("--lumadrobe-art", `url("${{artUrl}}")`);
+    root.setAttribute("data-dream-shell", detectShellMode());
+    for (const property of ART_PROPERTIES) {{
+      root.style.setProperty(property, `url("${{artUrl}}")`);
+    }}
     let style = document.getElementById(STYLE_ID);
     if (!style) {{
       style = document.createElement("style");
@@ -101,10 +126,41 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
       (document.head || root).appendChild(style);
     }}
     if (style.textContent !== cssText) style.textContent = cssText;
+    const shellMain = document.querySelector("main.main-surface") || document.querySelector("main");
+    if (shellMain) {{
+      shellMain.classList.add("lumadrobe-surface");
+      touched.add(shellMain);
+    }}
+    const homeIndicator = document.querySelector('[data-testid="home-icon"]');
+    const home = homeIndicator?.closest('[role="main"]') ||
+      Array.from(document.querySelectorAll('[role="main"]')).find((candidate) =>
+        candidate.querySelector('[data-feature="game-source"]')) || null;
+    for (const node of document.querySelectorAll(".dream-home, .dream-skin-home")) {{
+      if (node !== home) node.classList.remove("dream-home", "dream-skin-home");
+    }}
+    if (home) {{
+      home.classList.add("dream-home", "dream-skin-home");
+      touched.add(home);
+    }}
+    if (shellMain) {{
+      shellMain.classList.toggle("dream-home-shell", Boolean(home));
+      shellMain.classList.toggle("dream-skin-home-shell", Boolean(home));
+    }}
     for (const node of document.querySelectorAll("main.main-surface")) {{
       node.classList.add("lumadrobe-surface");
       touched.add(node);
     }}
+  }};
+
+  const status = () => {{
+    const root = document.documentElement;
+    const style = document.getElementById(STYLE_ID);
+    return {{
+      installed: Boolean(window[STATE_KEY]?.themeKey === theme.key),
+      styleAttached: Boolean(style?.isConnected && style.textContent === cssText),
+      rootTagged: Boolean(root && ROOT_CLASSES.every((name) => root.classList.contains(name))),
+      artAttached: Boolean(root && ART_PROPERTIES.every((name) => root.style.getPropertyValue(name))),
+    }};
   }};
 
   const observer = new MutationObserver(() => queueMicrotask(ensure));
@@ -113,20 +169,31 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   const cleanup = () => {{
     observer.disconnect();
     clearInterval(timer);
-    document.documentElement?.classList.remove("lumadrobe-theme");
+    document.documentElement?.classList.remove(...ROOT_CLASSES);
     if (document.documentElement?.dataset.lumadrobeTheme === theme.key) {{
       delete document.documentElement.dataset.lumadrobeTheme;
     }}
-    document.documentElement?.style.removeProperty("--lumadrobe-art");
+    document.documentElement?.removeAttribute("data-dream-shell");
+    for (const property of ART_PROPERTIES) {{
+      document.documentElement?.style.removeProperty(property);
+    }}
     document.getElementById(STYLE_ID)?.remove();
-    for (const node of touched) node.classList?.remove("lumadrobe-surface");
+    for (const node of touched) {{
+      node.classList?.remove(
+        "lumadrobe-surface",
+        "dream-home",
+        "dream-skin-home",
+        "dream-home-shell",
+        "dream-skin-home-shell",
+      );
+    }}
     URL.revokeObjectURL(artUrl);
     if (window[STATE_KEY]?.themeKey === theme.key) delete window[STATE_KEY];
     return true;
   }};
-  window[STATE_KEY] = {{ themeKey: theme.key, ensure, cleanup, observer, timer, artUrl }};
+  window[STATE_KEY] = {{ themeKey: theme.key, ensure, status, cleanup, observer, timer, artUrl }};
   ensure();
-  return {{ installed: true, themeKey: theme.key, reused: false }};
+  return {{ ...status(), themeKey: theme.key, reused: false }};
 }})({theme_json}, {css_json}, {art_json})"#
     ))
 }
@@ -237,6 +304,12 @@ mod tests {
         assert!(payload.contains("__LUMADROBE_RUNTIME__"));
         assert!(payload.contains("data:image/png;base64"));
         assert!(payload.contains("source:night@1.0.0"));
+        assert!(payload.contains("codex-dream-skin"));
+        assert!(payload.contains("--dream-art"));
+        assert!(payload.contains("--dream-skin-art"));
+        assert!(payload.contains("styleAttached"));
+        assert!(payload.contains("rootTagged"));
+        assert!(payload.contains("artAttached"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
