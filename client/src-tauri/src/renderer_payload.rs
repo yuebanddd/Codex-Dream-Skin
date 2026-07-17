@@ -386,9 +386,8 @@ mod tests {
         assert!(payload.contains("root.setAttribute(\"data-dream-shell\", refreshShellMode())"));
         assert!(payload.contains("mediaQuery.addEventListener(\"change\", mediaHandler)"));
         assert!(payload.contains("document.body?.getAttribute(\"data-theme\")"));
-        assert!(payload.contains(
-            "candidates.find((value) => value === \"dark\" || value === \"light\")"
-        ));
+        assert!(payload
+            .contains("candidates.find((value) => value === \"dark\" || value === \"light\")"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
