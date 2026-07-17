@@ -962,18 +962,8 @@ impl RuntimeManager {
         }
     }
 
-    async fn mark_watcher_error(
-        &self,
-        generation: u64,
-        record: &RuntimeRecord,
-        failure: &str,
-    ) {
-        self.record_log(
-            "error",
-            "watcher_stopped",
-            failure,
-            record_log_data(record),
-        );
+    async fn mark_watcher_error(&self, generation: u64, record: &RuntimeRecord, failure: &str) {
+        self.record_log("error", "watcher_stopped", failure, record_log_data(record));
         let mut inner = self.inner.lock().await;
         if inner.generation == generation {
             inner.cancel = None;

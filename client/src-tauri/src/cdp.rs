@@ -71,10 +71,13 @@ struct CdpSession {
 impl CdpSession {
     async fn connect(target: &CdpTarget, port: u16) -> AppResult<Self> {
         let url = validated_page_url(target, port)?;
-        let (stream, _) = timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url.as_str()))
-            .await
-            .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
-            .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
+        let (stream, _) = timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(url.as_str()),
+        )
+        .await
+        .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
+        .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
         let mut session = Self {
             target_id: target.id.clone(),
             stream,
@@ -103,9 +106,7 @@ impl CdpSession {
             )
             .await?;
         if let Some(exception) = result.get("exceptionDetails") {
-            return Err(AppError::Runtime(format!(
-                "渲染器执行失败：{exception}"
-            )));
+            return Err(AppError::Runtime(format!("渲染器执行失败：{exception}")));
         }
         Ok(result
             .pointer("/result/value")
@@ -113,12 +114,7 @@ impl CdpSession {
             .unwrap_or(Value::Null))
     }
 
-    async fn command(
-        &mut self,
-        method: &str,
-        params: Value,
-        wait: Duration,
-    ) -> AppResult<Value> {
+    async fn command(&mut self, method: &str, params: Value, wait: Duration) -> AppResult<Value> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let request = json!({ "id": id, "method": method, "params": params }).to_string();
@@ -135,12 +131,14 @@ impl CdpSession {
             .map_err(|error| AppError::Runtime(format!("发送 CDP 命令失败：{error}")))?;
 
         let response = loop {
-            let next = timeout_at(deadline, self.stream.next()).await.map_err(|_| {
-                AppError::Runtime(format!(
-                    "CDP 命令等待超时：{method}，目标 {}，载荷 {request_bytes} bytes",
-                    self.target_id
-                ))
-            })?;
+            let next = timeout_at(deadline, self.stream.next())
+                .await
+                .map_err(|_| {
+                    AppError::Runtime(format!(
+                        "CDP 命令等待超时：{method}，目标 {}，载荷 {request_bytes} bytes",
+                        self.target_id
+                    ))
+                })?;
             let message = next
                 .ok_or_else(|| AppError::Runtime("CDP WebSocket 已关闭".into()))?
                 .map_err(|error| AppError::Runtime(format!("CDP WebSocket 错误：{error}")))?;
