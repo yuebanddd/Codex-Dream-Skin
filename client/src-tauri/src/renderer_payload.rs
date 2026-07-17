@@ -11,7 +11,7 @@ const CSS_LIMIT: u64 = 1024 * 1024;
 
 const BASE_CSS: &str = r#"
 html.lumadrobe-theme {
-  color-scheme: dark;
+  color-scheme: light dark;
   --lumadrobe-panel: rgba(10, 12, 18, .84);
   --lumadrobe-line: rgba(255, 255, 255, .10);
 }
@@ -109,13 +109,16 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
       return "light";
     }}
   }};
+  // Capture the host appearance before adding any LumaDrobe classes or CSS.
+  // Later ensure calls must not infer Codex appearance from our own theme.
+  const initialShellMode = detectShellMode();
 
   const ensure = () => {{
     const root = document.documentElement;
     if (!root) return;
     root.classList.add(...ROOT_CLASSES);
     root.dataset.lumadrobeTheme = theme.key;
-    root.setAttribute("data-dream-shell", detectShellMode());
+    root.setAttribute("data-dream-shell", initialShellMode);
     for (const property of ART_PROPERTIES) {{
       root.style.setProperty(property, `url("${{artUrl}}")`);
     }}
@@ -310,6 +313,9 @@ mod tests {
         assert!(payload.contains("styleAttached"));
         assert!(payload.contains("rootTagged"));
         assert!(payload.contains("artAttached"));
+        let appearance = payload.find("const initialShellMode = detectShellMode()").unwrap();
+        let mutation = payload.find("root.classList.add(...ROOT_CLASSES)").unwrap();
+        assert!(appearance < mutation);
         std::fs::remove_dir_all(root).unwrap();
     }
 
