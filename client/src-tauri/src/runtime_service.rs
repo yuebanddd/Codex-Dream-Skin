@@ -1258,13 +1258,8 @@ async fn wait_until_ready_and_apply(
                         "CDP 端口监听者不是已验证的官方 Codex".into(),
                     ));
                 }
-                match cdp::apply_to_verified_targets(
-                    &manager.http,
-                    port,
-                    &identity.id,
-                    payload,
-                )
-                .await
+                match cdp::apply_to_verified_targets(&manager.http, port, &identity.id, payload)
+                    .await
                 {
                     Ok(count) if count > 0 => {
                         if let Some(snapshot) = pending_snapshot.take() {
@@ -1304,12 +1299,8 @@ async fn wait_until_ready_and_apply(
                 })
             }),
             None => {
-                cdp::diagnostic_snapshot(
-                    &manager.http,
-                    port,
-                    diagnostic_browser_id.as_deref(),
-                )
-                .await
+                cdp::diagnostic_snapshot(&manager.http, port, diagnostic_browser_id.as_deref())
+                    .await
             }
         };
         manager.record_log(
