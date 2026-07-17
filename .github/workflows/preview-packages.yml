@@ -78,7 +78,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release-gate:
+  release_gate:
     name: Verify release assets
     needs: package
     runs-on: ubuntu-latest
@@ -106,7 +106,7 @@ jobs:
   publish:
     name: Publish preview release
     if: github.event_name == 'push' && github.ref == 'refs/heads/release'
-    needs: release-gate
+    needs: release_gate
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -118,7 +118,7 @@ jobs:
       - name: Create GitHub pre-release
         env:
           GH_TOKEN: ${{ github.token }}
-        TAG: ${{ needs.release-gate.outputs.tag }}
+          TAG: ${{ needs.release_gate.outputs.tag }}
         shell: bash
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
