@@ -1146,13 +1146,7 @@ impl RuntimeManager {
         let manager = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             manager
-                .record_cdp_failure_snapshot(
-                    event,
-                    &message,
-                    &install,
-                    port,
-                    browser_id.as_deref(),
-                )
+                .record_cdp_failure_snapshot(event, &message, &install, port, browser_id.as_deref())
                 .await;
         });
     }
