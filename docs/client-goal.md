@@ -64,7 +64,7 @@ LumaDrobe 是一个去中心化的 Codex 主题衣橱：任何人都可以用公
 - [ ] Apple / Windows 正式签名
 - [ ] 自动更新
 - [ ] 兼容性矩阵和截图验收
-- [ ] `release` 分支自动构建 GitHub Release
+- [x] `release` 分支自动构建带唯一版本号的无签名 GitHub Pre-release
 
 ## 非目标
 

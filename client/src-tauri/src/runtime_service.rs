@@ -5,9 +5,11 @@ use crate::error::{AppError, AppResult};
 use crate::installed_store::InstalledStore;
 use crate::models::{InstalledSkin, RuntimeDiagnostics, RuntimeStatus};
 use crate::renderer_payload::build_payload;
+use crate::runtime_log::RuntimeLog;
 use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Child;
@@ -49,11 +51,16 @@ struct RuntimeInner {
 pub struct RuntimeManager {
     http: Client,
     path: PathBuf,
+    log: RuntimeLog,
     inner: Mutex<RuntimeInner>,
 }
 
 impl RuntimeManager {
     pub fn new(path: PathBuf) -> AppResult<Arc<Self>> {
+        let data_directory = path
+            .parent()
+            .ok_or_else(|| AppError::Runtime("无法定位 LumaDrobe 数据目录".into()))?;
+        let log = RuntimeLog::new(data_directory.join("logs").join("runtime.jsonl"))?;
         let record = if path.exists() {
             let parsed: RuntimeRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
             if parsed.schema_version != RUNTIME_SCHEMA {
@@ -67,9 +74,11 @@ impl RuntimeManager {
             .as_ref()
             .map(|record| status_for_record("checking", record, "正在验证上次的皮肤会话"))
             .unwrap_or_else(|| RuntimeStatus::stopped("皮肤引擎已就绪"));
-        Ok(Arc::new(Self {
+        let saved_session = record.is_some();
+        let manager = Arc::new(Self {
             http: cdp::build_client()?,
             path,
+            log,
             inner: Mutex::new(RuntimeInner {
                 status,
                 record,
@@ -80,7 +89,20 @@ impl RuntimeManager {
                 payload: None,
                 generation: 0,
             }),
-        }))
+        });
+        manager.record_log(
+            "info",
+            "runtime_started",
+            "LumaDrobe runtime initialized",
+            json!({
+                "clientVersion": env!("CARGO_PKG_VERSION"),
+                "buildCommit": option_env!("LUMADROBE_BUILD_SHA").unwrap_or("development"),
+                "platform": std::env::consts::OS,
+                "architecture": std::env::consts::ARCH,
+                "savedSession": saved_session,
+            }),
+        );
+        Ok(manager)
     }
 
     pub async fn status(&self) -> RuntimeStatus {
@@ -109,6 +131,12 @@ impl RuntimeManager {
         };
         let result = self.recover_inner(&record, installed_store).await;
         if let Err(error) = result {
+            self.record_log(
+                "error",
+                "recovery_failed",
+                error.to_string(),
+                record_log_data(&record),
+            );
             let mut inner = self.inner.lock().await;
             if inner
                 .record
@@ -162,7 +190,38 @@ impl RuntimeManager {
     }
 
     pub async fn apply(self: &Arc<Self>, installed: InstalledSkin) -> AppResult<RuntimeStatus> {
-        let payload = build_payload(&installed)?;
+        self.record_log(
+            "info",
+            "theme_apply_requested",
+            "Theme apply requested",
+            json!({
+                "sourceId": installed.source_id,
+                "skinId": installed.skin_id,
+                "version": installed.version,
+            }),
+        );
+        let payload = match build_payload(&installed) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.record_log(
+                    "error",
+                    "payload_build_failed",
+                    error.to_string(),
+                    json!({
+                        "sourceId": installed.source_id,
+                        "skinId": installed.skin_id,
+                        "version": installed.version,
+                    }),
+                );
+                return Err(error);
+            }
+        };
+        self.record_log(
+            "info",
+            "payload_ready",
+            "Renderer payload validated",
+            json!({ "payloadBytes": payload.len() }),
+        );
         {
             let mut inner = self.inner.lock().await;
             inner.status = RuntimeStatus {
@@ -220,7 +279,7 @@ impl RuntimeManager {
         }
 
         let (record, install, child) = if let Some((active, install)) = reuse {
-            if let Err(error) = cdp::apply_to_verified_targets(
+            let applied_targets = match cdp::apply_to_verified_targets(
                 &self.http,
                 active.port,
                 &active.browser_id,
@@ -228,16 +287,29 @@ impl RuntimeManager {
             )
             .await
             {
-                return self
-                    .fail_apply_attempt(
-                        &installed,
-                        Some(active),
-                        Some(install),
-                        previous_child,
-                        error.to_string(),
-                    )
-                    .await;
-            }
+                Ok(count) => count,
+                Err(error) => {
+                    return self
+                        .fail_apply_attempt(
+                            &installed,
+                            Some(active),
+                            Some(install),
+                            previous_child,
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            };
+            self.record_log(
+                "info",
+                "theme_injected",
+                "Theme injected into existing Codex session",
+                json!({
+                    "port": active.port,
+                    "browserId": active.browser_id,
+                    "verifiedTargets": applied_targets,
+                }),
+            );
             (
                 RuntimeRecord {
                     source_id: installed.source_id.clone(),
@@ -356,6 +428,17 @@ impl RuntimeManager {
                         .await;
                 }
             };
+            self.record_log(
+                "info",
+                "codex_launch_requested",
+                "Launching verified Codex installation with loopback CDP",
+                json!({
+                    "platform": install.platform,
+                    "codexIdentity": install.identity,
+                    "executable": install.executable,
+                    "port": port,
+                }),
+            );
             let child = match install.launch_with_cdp(port) {
                 Ok(child) => child,
                 Err(error) => {
@@ -382,8 +465,8 @@ impl RuntimeManager {
                 codex_identity: install.identity.clone(),
                 paused: false,
             };
-            let ready = wait_until_ready(&self.http, &install, port).await;
-            let (browser_id, _) = match ready {
+            let ready = wait_until_ready_and_apply(&self.http, &install, port, &payload).await;
+            let (browser_id, applied_targets) = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
                     return self
@@ -391,19 +474,17 @@ impl RuntimeManager {
                         .await;
                 }
             };
+            self.record_log(
+                "info",
+                "theme_injected",
+                "Theme injected into newly launched Codex session",
+                json!({
+                    "port": port,
+                    "browserId": browser_id,
+                    "verifiedTargets": applied_targets,
+                }),
+            );
             record.browser_id = browser_id;
-            if let Err(error) = cdp::apply_to_verified_targets(
-                &self.http,
-                record.port,
-                &record.browser_id,
-                &payload,
-            )
-            .await
-            {
-                return self
-                    .abort_failed_launch(&installed, record, install, child, error.to_string())
-                    .await;
-            }
             (record, install, Some(child))
         };
 
@@ -610,6 +691,7 @@ impl RuntimeManager {
         }
         RuntimeDiagnostics {
             generated_at: Utc::now().to_rfc3339(),
+            log_path: self.log.path().to_string_lossy().into_owned(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             build_commit: option_env!("LUMADROBE_BUILD_SHA")
                 .unwrap_or("development")
@@ -789,6 +871,16 @@ impl RuntimeManager {
         };
         let manager = Arc::clone(self);
         let theme_key = format!("{}:{}@{}", record.source_id, record.skin_id, record.version);
+        self.record_log(
+            "info",
+            "watcher_started",
+            "Renderer reinjection watcher started",
+            json!({
+                "port": record.port,
+                "browserId": record.browser_id,
+                "themeKey": theme_key,
+            }),
+        );
         let watcher = tauri::async_runtime::spawn(async move {
             let mut ticker = interval(Duration::from_secs(2));
             let mut failures = 0_u8;
@@ -798,24 +890,51 @@ impl RuntimeManager {
                         if changed.is_err() || *cancelled.borrow() { break; }
                     }
                     _ = ticker.tick() => {
-                        let owner_ok = install
-                            .verify_listener_owner(record.port)
-                            .unwrap_or(false);
-                        let applied = owner_ok && cdp::ensure_theme_on_verified_targets(
-                            &manager.http,
-                            record.port,
-                            &record.browser_id,
-                            &theme_key,
-                            &payload,
-                        ).await.is_ok();
-                        if applied {
+                        let result = match install.verify_listener_owner(record.port) {
+                            Ok(true) => cdp::ensure_theme_on_verified_targets(
+                                &manager.http,
+                                record.port,
+                                &record.browser_id,
+                                &theme_key,
+                                &payload,
+                            ).await.map(|_| ()),
+                            Ok(false) => Err(AppError::Runtime(
+                                "CDP 监听进程不再属于已验证的 Codex".into(),
+                            )),
+                            Err(error) => Err(error),
+                        };
+                        if result.is_ok() {
+                            if failures > 0 {
+                                manager.record_log(
+                                    "info",
+                                    "watcher_recovered",
+                                    "Renderer watcher recovered after a transient failure",
+                                    json!({ "consecutiveFailures": failures }),
+                                );
+                            }
                             failures = 0;
                         } else {
                             failures = failures.saturating_add(1);
-                        }
-                        if failures >= 3 {
-                            manager.mark_watcher_error(generation, &record).await;
-                            break;
+                            let error = result.expect_err("failed watcher check must contain error");
+                            if failures == 1 {
+                                manager.record_log(
+                                    "warn",
+                                    "watcher_check_failed",
+                                    error.to_string(),
+                                    json!({
+                                        "port": record.port,
+                                        "browserId": record.browser_id,
+                                        "consecutiveFailures": failures,
+                                    }),
+                                );
+                            }
+                            if failures >= 3 {
+                                let failure = error.to_string();
+                                manager
+                                    .mark_watcher_error(generation, &record, &failure)
+                                    .await;
+                                break;
+                            }
                         }
                     }
                 }
@@ -843,7 +962,18 @@ impl RuntimeManager {
         }
     }
 
-    async fn mark_watcher_error(&self, generation: u64, record: &RuntimeRecord) {
+    async fn mark_watcher_error(
+        &self,
+        generation: u64,
+        record: &RuntimeRecord,
+        failure: &str,
+    ) {
+        self.record_log(
+            "error",
+            "watcher_stopped",
+            failure,
+            record_log_data(record),
+        );
         let mut inner = self.inner.lock().await;
         if inner.generation == generation {
             inner.cancel = None;
@@ -862,6 +992,16 @@ impl RuntimeManager {
         message: impl Into<String>,
     ) -> AppResult<T> {
         let message = message.into();
+        self.record_log(
+            "error",
+            "theme_apply_failed",
+            message.clone(),
+            json!({
+                "sourceId": installed.source_id,
+                "skinId": installed.skin_id,
+                "version": installed.version,
+            }),
+        );
         let _ = self.persist(None);
         let mut inner = self.inner.lock().await;
         inner.record = None;
@@ -937,6 +1077,12 @@ impl RuntimeManager {
         message: impl Into<String>,
     ) -> AppResult<T> {
         let message = message.into();
+        self.record_log(
+            "error",
+            "runtime_session_failed",
+            message.clone(),
+            record_log_data(&record),
+        );
         let mut inner = self.inner.lock().await;
         inner.record = Some(record.clone());
         inner.install = install;
@@ -958,6 +1104,24 @@ impl RuntimeManager {
         }
         Ok(())
     }
+
+    fn record_log(&self, level: &str, event: &str, message: impl Into<String>, data: Value) {
+        let _ = self.log.record(level, event, message, data);
+    }
+}
+
+fn record_log_data(record: &RuntimeRecord) -> Value {
+    json!({
+        "sourceId": record.source_id,
+        "skinId": record.skin_id,
+        "version": record.version,
+        "port": record.port,
+        "browserId": record.browser_id,
+        "platform": record.platform,
+        "codexIdentity": record.codex_identity,
+        "executable": record.executable,
+        "paused": record.paused,
+    })
 }
 
 fn status_for_record(
@@ -1018,12 +1182,13 @@ fn select_available_port(preferred: u16) -> AppResult<u16> {
     )))
 }
 
-async fn wait_until_ready(
+async fn wait_until_ready_and_apply(
     http: &Client,
     install: &CodexInstall,
     port: u16,
+    payload: &str,
 ) -> AppResult<(String, usize)> {
-    let deadline = Instant::now() + Duration::from_secs(45);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
     while Instant::now() < deadline {
         match cdp::browser_identity(http, port).await {
@@ -1033,7 +1198,7 @@ async fn wait_until_ready(
                         "CDP 端口监听者不是已验证的官方 Codex".into(),
                     ));
                 }
-                match cdp::count_codex_targets(http, port, &identity.id).await {
+                match cdp::apply_to_verified_targets(http, port, &identity.id, payload).await {
                     Ok(count) if count > 0 => return Ok((identity.id, count)),
                     Ok(_) => last_error = "Codex 渲染页尚未完成 DOM 初始化".into(),
                     Err(error) => last_error = error.to_string(),
@@ -1044,7 +1209,7 @@ async fn wait_until_ready(
         sleep(Duration::from_millis(350)).await;
     }
     Err(AppError::Runtime(format!(
-        "等待 Codex CDP 超时：{last_error}"
+        "等待 Codex CDP 与主题注入超时：{last_error}"
     )))
 }
 

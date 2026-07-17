@@ -97,6 +97,7 @@ pub struct RuntimeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
     pub generated_at: String,
+    pub log_path: String,
     pub client_version: String,
     pub build_commit: String,
     pub platform: String,

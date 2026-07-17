@@ -37,6 +37,7 @@ LumaDrobe Desktop（React + Rust）
 | 订阅缓存       | `sources.json`                                      | `sources.json`                   |
 | 本地主题库     | `installed-skins.json`                              | `installed-skins.json`           |
 | 活动会话       | `runtime.json`                                      | `runtime.json`                   |
+| 运行日志       | `logs/runtime.jsonl`                                | `logs/runtime.jsonl`             |
 | 首选 CDP 端口  | `9341`                                              | `9335`                           |
 
 实际应用数据根目录由 Tauri `app_data_dir` 解析；表中路径用于说明平台位置，不应由业务代码手工拼接。

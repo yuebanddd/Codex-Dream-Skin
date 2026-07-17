@@ -84,6 +84,7 @@ export async function getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
   if (!inTauri()) {
     return {
       generatedAt: new Date().toISOString(),
+      logPath: "Web 预览模式无运行日志",
       clientVersion: "web-preview",
       buildCommit: "development",
       platform: navigator.platform || "web",

@@ -10,9 +10,6 @@ on:
       - "docs/preview-builds.md"
   push:
     branches: [release]
-    paths:
-      - "client/**"
-      - ".github/workflows/preview-packages.yml"
 
 permissions:
   contents: read
@@ -53,8 +50,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: client/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run check:version
@@ -82,3 +77,63 @@ jobs:
           path: client/artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+  release-gate:
+    name: Verify release assets
+    needs: package
+    runs-on: ubuntu-latest
+    env:
+      LUMADROBE_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+      - name: Verify and prepare release assets
+        id: release
+        run: node client/scripts/prepare-release-assets.mjs downloaded-artifacts release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaDrobe-release-assets
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish preview release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/release'
+    needs: release-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: LumaDrobe-release-assets
+          path: release-assets
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        TAG: ${{ needs.release-gate.outputs.tag }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_TARGET=$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)
+            if [ "$EXISTING_TARGET" != "$GITHUB_SHA" ]; then
+              echo "Refusing to replace $TAG because it targets $EXISTING_TARGET, not $GITHUB_SHA" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "LumaDrobe $TAG" \
+              --notes "Automated unsigned preview build from release commit $GITHUB_SHA. Verify the platform SHA256SUMS file before installation." \
+              --prerelease \
+              --latest=false
+          fi
+          echo "Published $TAG" >> "$GITHUB_STEP_SUMMARY"
