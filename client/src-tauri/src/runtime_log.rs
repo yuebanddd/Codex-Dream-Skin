@@ -115,7 +115,11 @@ mod tests {
 
         #[cfg(unix)]
         assert_eq!(
-            fs::metadata(&path).expect("read metadata").permissions().mode() & 0o777,
+            fs::metadata(&path)
+                .expect("read metadata")
+                .permissions()
+                .mode()
+                & 0o777,
             0o600
         );
 
