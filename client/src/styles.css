@@ -189,12 +189,17 @@ input {
   background: #57c784;
   box-shadow: 0 0 10px #57c784;
 }
+.runtime-card.paused > i {
+  background: #d6a85f;
+  box-shadow: 0 0 10px #d6a85f;
+}
 .runtime-card.error > i {
   background: #d65c68;
   box-shadow: 0 0 10px #d65c68;
 }
 .runtime-card.starting > i,
 .runtime-card.checking > i,
+.runtime-card.pausing > i,
 .runtime-card.stopping > i {
   animation: runtime-pulse 1.2s ease-in-out infinite;
 }
@@ -747,6 +752,42 @@ input {
   margin-top: 24px;
   padding: 12px 17px;
 }
+.runtime-controls {
+  display: flex;
+  gap: 10px;
+  margin-top: 24px;
+}
+.runtime-controls button,
+.diagnostics-page header > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 17px;
+  border: 0;
+  border-radius: 10px;
+  color: #fff8ef;
+  background: linear-gradient(135deg, #5d1b35, #7a3141);
+  box-shadow: 0 10px 24px rgba(79, 28, 44, 0.16);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.runtime-controls button.secondary {
+  border: 1px solid rgba(91, 55, 49, 0.14);
+  color: #594843;
+  background: rgba(255, 252, 247, 0.55);
+  box-shadow: none;
+}
+.runtime-controls button:disabled,
+.diagnostics-page header > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+.runtime-controls svg,
+.diagnostics-page header > button svg {
+  width: 17px;
+}
 .restore-note {
   display: flex;
   align-items: center;
@@ -758,6 +799,133 @@ input {
 .restore-note svg {
   width: 13px;
   color: #4e8b63;
+}
+.diagnostics-page {
+  min-height: 100%;
+  padding: 48px 54px;
+}
+.diagnostics-page > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.diagnostics-page h1 {
+  margin: 12px 0 8px;
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: 32px;
+}
+.diagnostics-page header p {
+  margin: 0;
+  color: #887d78;
+  font-size: 11px;
+}
+.diagnostics-page header > button {
+  color: #594843;
+  background: rgba(255, 252, 247, 0.58);
+  border: 1px solid rgba(91, 55, 49, 0.12);
+  box-shadow: none;
+}
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 32px;
+}
+.diagnostics-grid article {
+  position: relative;
+  min-height: 104px;
+  padding: 18px;
+  border: 1px solid rgba(85, 56, 49, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 252, 247, 0.44);
+}
+.diagnostics-grid article span,
+.diagnostics-grid article strong {
+  display: block;
+}
+.diagnostics-grid article span {
+  color: #94857f;
+  font-size: 9px;
+}
+.diagnostics-grid article strong {
+  margin-top: 11px;
+  color: #81515a;
+  font-size: 15px;
+}
+.diagnostics-grid article.healthy strong {
+  color: #3f7654;
+}
+.diagnostics-grid article svg {
+  position: absolute;
+  right: 15px;
+  top: 15px;
+  width: 16px;
+  color: #aa7b7b;
+}
+.diagnostics-grid article.healthy svg {
+  color: #5a966d;
+}
+.diagnostics-detail {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 28px;
+  margin-top: 18px;
+  padding: 7px 20px;
+  border: 1px solid rgba(85, 56, 49, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 252, 247, 0.35);
+}
+.diagnostics-detail > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 0;
+  border-bottom: 1px solid rgba(85, 56, 49, 0.08);
+  font-size: 10px;
+}
+.diagnostics-detail span {
+  color: #958681;
+}
+.diagnostics-detail strong,
+.diagnostics-detail code {
+  color: #4d403d;
+  text-align: right;
+}
+.diagnostics-detail .diagnostics-path {
+  grid-column: 1 / -1;
+  border-bottom: 0;
+}
+.diagnostics-path code {
+  overflow-wrap: anywhere;
+  font-size: 9px;
+}
+.diagnostics-notes {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 15px 18px;
+  border-left: 3px solid #8d5362;
+  border-radius: 0 10px 10px 0;
+  color: #756763;
+  background: rgba(255, 252, 247, 0.32);
+  font-size: 9px;
+}
+.diagnostics-notes strong {
+  color: #594a46;
+}
+.diagnostics-notes small {
+  margin-top: 4px;
+  color: #9d8e88;
+}
+.diagnostics-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 360px;
+  color: #8c7e79;
+  font-size: 11px;
 }
 @media (max-width: 1080px) {
   .wardrobe-layout {

@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
+  Activity,
   Check,
+  CirclePause,
+  CirclePlay,
   Download,
   GalleryVerticalEnd,
   Github,
@@ -22,20 +25,24 @@ import {
   deleteInstalledSkin,
   installSkin,
   getRuntimeStatus,
+  getRuntimeDiagnostics,
   listInstalledSkins,
   listSources,
   refreshSource,
   removeSource,
+  pauseTheme,
+  resumeTheme,
   restoreNative,
 } from "./lib/api";
 import type {
   CatalogSkin,
   InstalledSkin,
+  RuntimeDiagnostics,
   RuntimeStatus,
   SourceRecord,
 } from "./types";
 
-type View = "wardrobe" | "import" | "restore";
+type View = "wardrobe" | "import" | "restore" | "diagnostics";
 type InstallationStatus = "remote" | "installed" | "update";
 
 const featuredSkins: CatalogSkin[] = [
@@ -110,6 +117,9 @@ function App() {
     phase: "stopped",
     message: "正在连接 Rust Core",
   });
+  const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -135,10 +145,30 @@ function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void getRuntimeStatus().then(setRuntime).catch(() => undefined);
+      void getRuntimeStatus()
+        .then(setRuntime)
+        .catch(() => undefined);
     }, 2000);
     return () => window.clearInterval(timer);
   }, []);
+
+  const refreshDiagnostics = useCallback(async () => {
+    setWorking("diagnostics");
+    setError("");
+    try {
+      const nextDiagnostics = await getRuntimeDiagnostics();
+      setDiagnostics(nextDiagnostics);
+      setRuntime(nextDiagnostics.runtime);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorking(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (view === "diagnostics") void refreshDiagnostics();
+  }, [refreshDiagnostics, view]);
 
   const remoteSkins = useMemo(
     () => sources.flatMap((source) => source.skins),
@@ -307,6 +337,32 @@ function App() {
     }
   }
 
+  async function handlePause() {
+    setWorking("pause");
+    setError("");
+    try {
+      setRuntime(await pauseTheme());
+    } catch (reason) {
+      setError(String(reason));
+      setRuntime(await getRuntimeStatus());
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function handleResume() {
+    setWorking("resume");
+    setError("");
+    try {
+      setRuntime(await resumeTheme());
+    } catch (reason) {
+      setError(String(reason));
+      setRuntime(await getRuntimeStatus());
+    } finally {
+      setWorking(null);
+    }
+  }
+
   return (
     <div className="atelier-shell">
       <Sidebar
@@ -343,11 +399,19 @@ function App() {
             onRefresh={handleRefresh}
             onRemove={handleRemove}
           />
-        ) : (
+        ) : view === "restore" ? (
           <RestoreView
             runtime={runtime}
-            working={working === "restore"}
+            working={working}
+            onPause={handlePause}
+            onResume={handleResume}
             onRestore={handleRestore}
+          />
+        ) : (
+          <DiagnosticsView
+            diagnostics={diagnostics}
+            loading={working === "diagnostics"}
+            onRefresh={refreshDiagnostics}
           />
         )}
       </main>
@@ -409,6 +473,13 @@ function Sidebar({
           <RotateCcw />
           <span>恢复原生</span>
         </button>
+        <button
+          className={view === "diagnostics" ? "active" : ""}
+          onClick={() => onNavigate("diagnostics")}
+        >
+          <Activity />
+          <span>运行诊断</span>
+        </button>
       </nav>
       <p className="safety-copy">
         主题只改变外观，不修改 Codex 安装包和你的对话数据。
@@ -419,11 +490,15 @@ function Sidebar({
           <strong>
             {runtime.phase === "running"
               ? "皮肤引擎正在运行"
-              : runtime.phase === "error"
-                ? "皮肤引擎需要处理"
-                : runtime.phase === "starting" || runtime.phase === "checking"
-                  ? "正在验证皮肤引擎"
-                  : "皮肤引擎已就绪"}
+              : runtime.phase === "paused"
+                ? "皮肤已暂停"
+                : runtime.phase === "error"
+                  ? "皮肤引擎需要处理"
+                  : runtime.phase === "starting" ||
+                      runtime.phase === "checking" ||
+                      runtime.phase === "pausing"
+                    ? "正在验证皮肤引擎"
+                    : "皮肤引擎已就绪"}
           </strong>
           <span>
             Rust Core · {runtime.port ? `CDP ${runtime.port}` : "CDP loopback"}
@@ -459,9 +534,12 @@ function Wardrobe({
   onDelete: (skin: CatalogSkin) => Promise<void>;
 }) {
   const selectedKey = `${selected.sourceId}:${selected.manifest.id}`;
-  const activeKey = runtime.activeSourceId && runtime.activeSkinId
-    ? `${runtime.activeSourceId}:${runtime.activeSkinId}`
-    : undefined;
+  const activeKey =
+    runtime.activeSourceId && runtime.activeSkinId
+      ? `${runtime.activeSourceId}:${runtime.activeSkinId}`
+      : undefined;
+  const sessionProtected = (key: string) =>
+    activeKey === key && runtime.phase !== "stopped";
   const getStatus = (skin: CatalogSkin): InstallationStatus => {
     const installedVersion = installedVersions.get(
       `${skin.sourceId}:${skin.manifest.id}`,
@@ -497,7 +575,14 @@ function Wardrobe({
               skin={skin}
               selected={`${skin.sourceId}:${skin.manifest.id}` === selectedKey}
               status={getStatus(skin)}
-              active={activeKey === `${skin.sourceId}:${skin.manifest.id}` && runtime.phase === "running"}
+              active={
+                activeKey === `${skin.sourceId}:${skin.manifest.id}` &&
+                runtime.phase === "running"
+              }
+              paused={
+                activeKey === `${skin.sourceId}:${skin.manifest.id}` &&
+                runtime.phase === "paused"
+              }
               onSelect={() => onSelect(`${skin.sourceId}:${skin.manifest.id}`)}
             />
           ))}
@@ -508,6 +593,8 @@ function Wardrobe({
         status={getStatus(selected)}
         working={working}
         active={activeKey === selectedKey && runtime.phase === "running"}
+        paused={activeKey === selectedKey && runtime.phase === "paused"}
+        sessionProtected={sessionProtected(selectedKey)}
         onInstall={onInstall}
         onApply={onApply}
         onDelete={onDelete}
@@ -521,12 +608,14 @@ function ThemeCard({
   selected,
   status,
   active,
+  paused,
   onSelect,
 }: {
   skin: CatalogSkin;
   selected: boolean;
   status: InstallationStatus;
   active: boolean;
+  paused: boolean;
   onSelect: () => void;
 }) {
   const colors = Object.values(skin.manifest.colors ?? {}).slice(0, 3);
@@ -550,9 +639,9 @@ function ThemeCard({
               ? "可更新"
               : "云端"}
         </span>
-        {(selected || active) && (
+        {(selected || active || paused) && (
           <span className={`using-badge ${active ? "active" : ""}`}>
-            {active ? "使用中" : "已选择"}
+            {active ? "使用中" : paused ? "已暂停" : "已选择"}
           </span>
         )}
         <div className="theme-title">
@@ -577,6 +666,8 @@ function FittingRoom({
   status,
   working,
   active,
+  paused,
+  sessionProtected,
   onInstall,
   onApply,
   onDelete,
@@ -585,6 +676,8 @@ function FittingRoom({
   status: InstallationStatus;
   working: string | null;
   active: boolean;
+  paused: boolean;
+  sessionProtected: boolean;
   onInstall: (skin: CatalogSkin) => Promise<void>;
   onApply: (skin: CatalogSkin) => Promise<void>;
   onDelete: (skin: CatalogSkin) => Promise<void>;
@@ -603,7 +696,7 @@ function FittingRoom({
   const installed = status === "installed";
   const hasLocalVersion = status !== "remote";
   const updateAvailable = status === "update";
-  const activeUpdate = active && updateAvailable;
+  const activeUpdate = sessionProtected && updateAvailable;
   return (
     <aside className="fitting-room">
       <header>
@@ -614,7 +707,9 @@ function FittingRoom({
             : installed
               ? active
                 ? "当前使用中"
-                : "本地已安装"
+                : paused
+                  ? "当前已暂停"
+                  : "本地已安装"
               : "在线主题"}
         </span>
       </header>
@@ -644,17 +739,19 @@ function FittingRoom({
       <div className="fitting-actions">
         <button
           className="apply-button"
-          disabled={showcase || activeUpdate || themeOperationActive}
-          onClick={() =>
-            void (installed ? onApply(skin) : onInstall(skin))
-          }
+          disabled={showcase || activeUpdate || paused || themeOperationActive}
+          onClick={() => void (installed ? onApply(skin) : onInstall(skin))}
         >
           {installing || applying ? (
             <LoaderCircle className="spin" size={20} />
           ) : activeUpdate ? (
             <RotateCcw size={20} />
           ) : installed ? (
-            active ? <Check size={20} /> : <PlayCircle size={20} />
+            active ? (
+              <Check size={20} />
+            ) : (
+              <PlayCircle size={20} />
+            )
           ) : (
             <Download size={20} />
           )}
@@ -666,26 +763,28 @@ function FittingRoom({
                   ? "正在应用并启动"
                   : activeUpdate
                     ? "先恢复再更新"
-                : installed
-                  ? active
-                    ? "重新应用主题"
-                    : "应用并启动"
-                  : updateAvailable
-                    ? `更新到 v${skin.manifest.version}`
-                    : showcase
-                      ? "订阅后安装"
-                      : "下载并安装"}
+                    : installed
+                      ? active
+                        ? "重新应用主题"
+                        : paused
+                          ? "主题已暂停"
+                          : "应用并启动"
+                      : updateAvailable
+                        ? `更新到 v${skin.manifest.version}`
+                        : showcase
+                          ? "订阅后安装"
+                          : "下载并安装"}
             </strong>
             <small>
               {activeUpdate
                 ? "保护当前运行版本"
                 : installed
-                ? active
-                  ? "热重载当前主题"
-                  : "Rust Core · loopback CDP"
-                : updateAvailable
-                  ? "安全替换本地版本"
-                  : "校验图片与 CSS"}
+                  ? active
+                    ? "热重载当前主题"
+                    : "Rust Core · loopback CDP"
+                  : updateAvailable
+                    ? "安全替换本地版本"
+                    : "校验图片与 CSS"}
             </small>
           </span>
         </button>
@@ -695,7 +794,9 @@ function FittingRoom({
         </button>
         <button
           className="delete-button"
-          disabled={!hasLocalVersion || active || themeOperationActive}
+          disabled={
+            !hasLocalVersion || sessionProtected || themeOperationActive
+          }
           onClick={() => void onDelete(skin)}
         >
           {deleting ? (
@@ -775,13 +876,20 @@ function ImportSources({
 function RestoreView({
   runtime,
   working,
+  onPause,
+  onResume,
   onRestore,
 }: {
   runtime: RuntimeStatus;
-  working: boolean;
+  working: string | null;
+  onPause: () => Promise<void>;
+  onResume: () => Promise<void>;
   onRestore: () => Promise<void>;
 }) {
   const canRestore = runtime.phase !== "stopped";
+  const pausing = working === "pause";
+  const resuming = working === "resume";
+  const restoring = working === "restore";
   return (
     <div className="restore-page">
       <div className="restore-icon">
@@ -790,20 +898,164 @@ function RestoreView({
       <span className="atelier-eyebrow">SAFE RESTORE</span>
       <h1>恢复 Codex 原生外观</h1>
       <p>
-        停止皮肤引擎、移除当前注入，并按原子备份恢复外观设置。项目与对话不会受到影响。
+        可以临时暂停皮肤而不退出 Codex，也可以彻底关闭 CDP 会话并恢复原生外观。
       </p>
-      <button
-        disabled={!canRestore || working}
-        onClick={() => void onRestore()}
-      >
-        {working ? <LoaderCircle className="spin" /> : <RotateCcw />}
-        {working ? "正在安全恢复" : "恢复原生并重启"}
-      </button>
+      <div className="runtime-controls">
+        {runtime.phase === "paused" ? (
+          <button disabled={Boolean(working)} onClick={() => void onResume()}>
+            {resuming ? <LoaderCircle className="spin" /> : <CirclePlay />}
+            {resuming ? "正在恢复主题" : "恢复皮肤"}
+          </button>
+        ) : (
+          <button
+            disabled={runtime.phase !== "running" || Boolean(working)}
+            onClick={() => void onPause()}
+          >
+            {pausing ? <LoaderCircle className="spin" /> : <CirclePause />}
+            {pausing ? "正在暂停" : "临时暂停皮肤"}
+          </button>
+        )}
+        <button
+          className="secondary"
+          disabled={!canRestore || Boolean(working)}
+          onClick={() => void onRestore()}
+        >
+          {restoring ? <LoaderCircle className="spin" /> : <RotateCcw />}
+          {restoring ? "正在安全恢复" : "恢复原生并重启"}
+        </button>
+      </div>
       <div className="restore-note">
         {runtime.phase === "error" ? <Monitor /> : <Check />}
         {runtime.message}
       </div>
     </div>
+  );
+}
+
+function DiagnosticsView({
+  diagnostics,
+  loading,
+  onRefresh,
+}: {
+  diagnostics: RuntimeDiagnostics | null;
+  loading: boolean;
+  onRefresh: () => Promise<void>;
+}) {
+  const stateLabel = (value?: boolean) =>
+    value === undefined ? "未检查" : value ? "通过" : "失败";
+  return (
+    <div className="diagnostics-page">
+      <header>
+        <div>
+          <span className="atelier-eyebrow">
+            <Activity size={13} /> RUNTIME DIAGNOSTICS
+          </span>
+          <h1>运行诊断</h1>
+          <p>只读检查 Codex 安装、进程身份、回环监听和渲染器会话。</p>
+        </div>
+        <button disabled={loading} onClick={() => void onRefresh()}>
+          <RefreshCcw className={loading ? "spin" : ""} />
+          重新检查
+        </button>
+      </header>
+      {diagnostics ? (
+        <>
+          <div className="diagnostics-grid">
+            <DiagnosticCard
+              label="官方 Codex"
+              value={diagnostics.codexFound ? "已发现" : "未发现"}
+              healthy={diagnostics.codexFound}
+            />
+            <DiagnosticCard
+              label="进程状态"
+              value={stateLabel(diagnostics.codexRunning)}
+              healthy={diagnostics.codexRunning}
+            />
+            <DiagnosticCard
+              label="监听身份"
+              value={stateLabel(diagnostics.listenerVerified)}
+              healthy={diagnostics.listenerVerified}
+            />
+            <DiagnosticCard
+              label="CDP 会话"
+              value={stateLabel(diagnostics.endpointVerified)}
+              healthy={diagnostics.endpointVerified}
+            />
+            <DiagnosticCard
+              label="Codex 页面"
+              value={
+                diagnostics.verifiedTargets === undefined
+                  ? "未检查"
+                  : `${diagnostics.verifiedTargets} 个已验证`
+              }
+              healthy={Boolean(diagnostics.verifiedTargets)}
+            />
+            <DiagnosticCard
+              label="皮肤状态"
+              value={diagnostics.paused ? "已暂停" : diagnostics.runtime.phase}
+              healthy={
+                diagnostics.runtime.phase === "running" || diagnostics.paused
+              }
+            />
+          </div>
+          <section className="diagnostics-detail">
+            <div>
+              <span>客户端</span>
+              <strong>v{diagnostics.clientVersion}</strong>
+            </div>
+            <div>
+              <span>平台</span>
+              <strong>
+                {diagnostics.platform} · {diagnostics.architecture}
+              </strong>
+            </div>
+            <div>
+              <span>Codex 版本</span>
+              <strong>{diagnostics.codexVersion ?? "未知"}</strong>
+            </div>
+            <div>
+              <span>会话记录</span>
+              <strong>{diagnostics.savedSession ? "已保存" : "无"}</strong>
+            </div>
+            <div className="diagnostics-path">
+              <span>可执行文件</span>
+              <code>{diagnostics.executable ?? "未发现"}</code>
+            </div>
+          </section>
+          <div className="diagnostics-notes">
+            <strong>{diagnostics.runtime.message}</strong>
+            {diagnostics.notes.map((note) => (
+              <span key={note}>{note}</span>
+            ))}
+            <small>
+              检查时间：{new Date(diagnostics.generatedAt).toLocaleString()}
+            </small>
+          </div>
+        </>
+      ) : (
+        <div className="diagnostics-loading">
+          <LoaderCircle className="spin" /> 正在读取 Rust Core 诊断信息
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiagnosticCard({
+  label,
+  value,
+  healthy,
+}: {
+  label: string;
+  value: string;
+  healthy?: boolean;
+}) {
+  return (
+    <article className={healthy ? "healthy" : ""}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {healthy ? <Check /> : <Monitor />}
+    </article>
   );
 }
 

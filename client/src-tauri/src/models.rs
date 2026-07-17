@@ -93,6 +93,35 @@ pub struct RuntimeStatus {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDiagnostics {
+    pub generated_at: String,
+    pub client_version: String,
+    pub platform: String,
+    pub architecture: String,
+    pub runtime: RuntimeStatus,
+    pub saved_session: bool,
+    pub paused: bool,
+    pub codex_found: bool,
+    #[serde(default)]
+    pub codex_version: Option<String>,
+    #[serde(default)]
+    pub codex_identity: Option<String>,
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub codex_running: Option<bool>,
+    #[serde(default)]
+    pub listener_verified: Option<bool>,
+    #[serde(default)]
+    pub endpoint_verified: Option<bool>,
+    #[serde(default)]
+    pub verified_targets: Option<usize>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
 impl RuntimeStatus {
     pub fn stopped(message: impl Into<String>) -> Self {
         Self {
