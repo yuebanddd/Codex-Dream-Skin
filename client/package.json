@@ -1,7 +1,7 @@
 {
   "name": "lumadrobe-client",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "build:desktop": "tauri build",
     "check": "tsc --noEmit",
+    "check:version": "node scripts/check-version.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

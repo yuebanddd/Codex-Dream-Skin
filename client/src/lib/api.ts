@@ -85,6 +85,7 @@ export async function getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
     return {
       generatedAt: new Date().toISOString(),
       clientVersion: "web-preview",
+      buildCommit: "development",
       platform: navigator.platform || "web",
       architecture: "unknown",
       runtime: await getRuntimeStatus(),
@@ -95,6 +96,13 @@ export async function getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
     };
   }
   return invoke<RuntimeDiagnostics>("runtime_diagnostics");
+}
+
+export async function exportRuntimeDiagnostics(): Promise<string> {
+  if (!inTauri()) {
+    throw new Error("Web 预览模式不能导出本机诊断，请使用 Tauri 桌面端。");
+  }
+  return invoke<string>("export_runtime_diagnostics");
 }
 
 export async function applyAndLaunch(

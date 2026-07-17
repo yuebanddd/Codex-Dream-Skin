@@ -179,6 +179,15 @@ pub async fn runtime_diagnostics(state: State<'_, AppState>) -> Result<RuntimeDi
 }
 
 #[tauri::command]
+pub async fn export_runtime_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
+    state
+        .runtime
+        .export_diagnostics()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn apply_and_launch(
     source_id: String,
     skin_id: String,

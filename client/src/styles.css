@@ -386,8 +386,13 @@ input {
 .theme-art {
   position: relative;
   height: 170px;
-  background-size: cover;
-  background-position: center;
+  overflow: hidden;
+}
+.theme-art-image,
+.poster-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .theme-art:after {
   content: "";
@@ -464,8 +469,7 @@ input {
   display: flex;
   flex: 0 0 auto;
 }
-.swatches i,
-.color-row i {
+.color-swatch {
   width: 11px;
   height: 11px;
   border: 2px solid #f7f1e8;
@@ -504,8 +508,6 @@ input {
   height: 314px;
   overflow: hidden;
   border-radius: 15px;
-  background-size: cover;
-  background-position: center;
   box-shadow: 0 14px 28px rgba(35, 22, 21, 0.18);
 }
 .poster:after {
@@ -758,7 +760,7 @@ input {
   margin-top: 24px;
 }
 .runtime-controls button,
-.diagnostics-page header > button {
+.diagnostics-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -780,12 +782,12 @@ input {
   box-shadow: none;
 }
 .runtime-controls button:disabled,
-.diagnostics-page header > button:disabled {
+.diagnostics-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
 }
 .runtime-controls svg,
-.diagnostics-page header > button svg {
+.diagnostics-actions svg {
   width: 17px;
 }
 .restore-note {
@@ -820,7 +822,11 @@ input {
   color: #887d78;
   font-size: 11px;
 }
-.diagnostics-page header > button {
+.diagnostics-actions {
+  display: flex;
+  gap: 8px;
+}
+.diagnostics-actions button {
   color: #594843;
   background: rgba(255, 252, 247, 0.58);
   border: 1px solid rgba(91, 55, 49, 0.12);
@@ -917,6 +923,12 @@ input {
 .diagnostics-notes small {
   margin-top: 4px;
   color: #9d8e88;
+}
+.diagnostics-notes code {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: #5f484e;
+  font-size: 9px;
 }
 .diagnostics-loading {
   display: flex;

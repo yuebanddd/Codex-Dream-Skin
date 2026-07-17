@@ -611,6 +611,9 @@ impl RuntimeManager {
         RuntimeDiagnostics {
             generated_at: Utc::now().to_rfc3339(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            build_commit: option_env!("LUMADROBE_BUILD_SHA")
+                .unwrap_or("development")
+                .into(),
             platform: std::env::consts::OS.into(),
             architecture: std::env::consts::ARCH.into(),
             runtime,
@@ -628,6 +631,25 @@ impl RuntimeManager {
             verified_targets,
             notes,
         }
+    }
+
+    pub async fn export_diagnostics(&self) -> AppResult<String> {
+        let diagnostics = self.diagnostics().await;
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| AppError::Runtime("无法定位 LumaDrobe 数据目录".into()))?;
+        let directory = parent.join("diagnostics");
+        std::fs::create_dir_all(&directory)?;
+        let filename = format!(
+            "lumadrobe-diagnostics-{}.json",
+            Utc::now().format("%Y%m%dT%H%M%SZ")
+        );
+        let path = directory.join(filename);
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(&diagnostics)?)?;
+        replace_file(&temporary, &path)?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     pub async fn restore(self: &Arc<Self>) -> AppResult<RuntimeStatus> {

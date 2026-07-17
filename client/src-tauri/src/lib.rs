@@ -39,7 +39,7 @@ pub fn run() {
                 data_dir.join("installed-skins.json"),
             )?));
             let http = Client::builder()
-                .user_agent("LumaDrobe/0.4.0")
+                .user_agent("LumaDrobe/0.5.0")
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::limited(3))
                 .build()?;
@@ -73,6 +73,7 @@ pub fn run() {
             commands::delete_installed_skin,
             commands::runtime_status,
             commands::runtime_diagnostics,
+            commands::export_runtime_diagnostics,
             commands::apply_and_launch,
             commands::pause_theme,
             commands::resume_theme,

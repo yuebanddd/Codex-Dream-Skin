@@ -74,6 +74,7 @@ export interface RuntimeStatus {
 export interface RuntimeDiagnostics {
   generatedAt: string;
   clientVersion: string;
+  buildCommit: string;
   platform: string;
   architecture: string;
   runtime: RuntimeStatus;

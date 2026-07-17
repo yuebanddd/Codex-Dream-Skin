@@ -1,0 +1,82 @@
+name: Preview packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [release]
+    paths:
+      - "client/**"
+      - ".github/workflows/preview-packages.yml"
+      - "docs/preview-builds.md"
+  push:
+    branches: [release]
+    paths:
+      - "client/**"
+      - ".github/workflows/preview-packages.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS DMG (arm64)
+            os: macos-15
+            bundle: dmg
+            artifact: LumaDrobe-macOS-arm64
+          - name: macOS DMG (x64)
+            os: macos-15-intel
+            bundle: dmg
+            artifact: LumaDrobe-macOS-x64
+          - name: Windows NSIS (x64)
+            os: windows-2025
+            bundle: nsis
+            artifact: LumaDrobe-Windows-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: client
+    env:
+      LUMADROBE_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run check:version
+      - name: Generate platform icons
+        run: npm run tauri -- icon src-tauri/icons/icon.png
+      - name: Build unsigned preview package
+        run: npm run build:desktop -- --bundles ${{ matrix.bundle }}
+      - name: Collect macOS package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -exec cp '{}' artifacts/ \;
+      - name: Collect Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe | Copy-Item -Destination artifacts
+      - name: Write build metadata and checksums
+        run: node scripts/write-build-info.mjs artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: client/artifacts/*
+          if-no-files-found: error
+          retention-days: 14

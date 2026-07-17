@@ -14,7 +14,7 @@ LumaDrobe Desktop（React + Rust）
 
 订阅仓库只能提供声明式清单、PNG/JPEG/WebP 和通过静态检查的 CSS。Renderer JavaScript 适配器随 LumaDrobe 发布，不从 Git 仓库下载。
 
-## LumaDrobe v0.4 安全边界
+## LumaDrobe v0.5 安全边界
 
 - CDP 固定绑定 `127.0.0.1`，仅从平台首选端口后的 100 个端口中选择空闲端口
 - 每次注入前验证监听进程属于已验证的官方 Codex
@@ -30,32 +30,35 @@ LumaDrobe Desktop（React + Rust）
 
 ## 路径速查
 
-| 用途 | macOS | Windows |
-|---|---|---|
+| 用途           | macOS                                               | Windows                          |
+| -------------- | --------------------------------------------------- | -------------------------------- |
 | LumaDrobe 数据 | `~/Library/Application Support/com.dreamskin.codex` | `%APPDATA%\\com.dreamskin.codex` |
-| 已安装主题 | 应用数据目录下 `themes/` | 应用数据目录下 `themes/` |
-| 订阅缓存 | `sources.json` | `sources.json` |
-| 本地主题库 | `installed-skins.json` | `installed-skins.json` |
-| 活动会话 | `runtime.json` | `runtime.json` |
-| 首选 CDP 端口 | `9341` | `9335` |
+| 已安装主题     | 应用数据目录下 `themes/`                            | 应用数据目录下 `themes/`         |
+| 订阅缓存       | `sources.json`                                      | `sources.json`                   |
+| 本地主题库     | `installed-skins.json`                              | `installed-skins.json`           |
+| 活动会话       | `runtime.json`                                      | `runtime.json`                   |
+| 首选 CDP 端口  | `9341`                                              | `9335`                           |
 
 实际应用数据根目录由 Tauri `app_data_dir` 解析；表中路径用于说明平台位置，不应由业务代码手工拼接。
 
 ## 客户端能力矩阵
 
-| 功能 | macOS | Windows |
-|---|:---:|:---:|
-| 官方应用发现与身份验证 | ✅ | ✅ |
-| Rust CDP 启动与注入 | ✅ | ✅ |
-| 会话内热切换 | ✅ | ✅ |
-| Renderer 重载自动重注入 | ✅ | ✅ |
-| 无重启暂停与恢复 | ✅ | ✅ |
-| 只读运行诊断 | ✅ | ✅ |
-| 恢复原生并重启 | ✅ | ✅ |
-| Git 仓库订阅与本地安装 | ✅ | ✅ |
-| 实机兼容性矩阵 | 待验收 | 待验收 |
+| 功能                    |      macOS      | Windows  |
+| ----------------------- | :-------------: | :------: |
+| 官方应用发现与身份验证  |       ✅        |    ✅    |
+| Rust CDP 启动与注入     |       ✅        |    ✅    |
+| 会话内热切换            |       ✅        |    ✅    |
+| Renderer 重载自动重注入 |       ✅        |    ✅    |
+| 无重启暂停与恢复        |       ✅        |    ✅    |
+| 只读运行诊断            |       ✅        |    ✅    |
+| 无签名测试安装包        | DMG arm64 / x64 | NSIS x64 |
+| 恢复原生并重启          |       ✅        |    ✅    |
+| Git 仓库订阅与本地安装  |       ✅        |    ✅    |
+| 实机兼容性矩阵          |     待验收      |  待验收  |
 
 `macos/` 与 `windows/` 下的旧脚本继续保留为兼容性参考，新的桌面产品能力以 `client/` 为准。
+
+测试安装包由 GitHub Actions 在干净 runner 上构建，附带构建提交与 SHA-256；当前不包含 Apple 或 Microsoft 正式签名，不应作为正式发行版传播。
 
 ## 不要提交的内容
 
