@@ -4,7 +4,7 @@
 
 - Windows 渲染页在每次连接后先启用 Runtime 与 Page 域，再在同一 CDP 会话内完成 DOM 校验与主题注入
 - `Runtime.evaluate` 使用独立 30 秒时限，错误包含命令、目标 ID 与载荷大小
-- 新增 1 MiB 滚动 JSONL 运行日志，诊断页直接展示日志路径
+- 新增 1 MiB 滚动 JSONL 运行日志，Unix 权限固定为 `0600`，诊断页直接展示日志路径
 - PR 阶段汇总并复验三个平台的发布资产，合并到 `release` 后才自动创建唯一版本号的 Pre-release
 - GitHub Actions 不使用 npm 依赖缓存
 - 版本升级至 0.5.1
