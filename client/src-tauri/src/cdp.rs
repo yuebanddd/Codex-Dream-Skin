@@ -371,8 +371,7 @@ pub async fn apply_to_verified_targets(
     for target in targets {
         match evaluate_many(&target, port, &[&guarded_payload]).await {
             Ok(values)
-                if probe_is_codex(values.first())
-                    && theme_install_is_confirmed(values.first()) =>
+                if probe_is_codex(values.first()) && theme_install_is_confirmed(values.first()) =>
             {
                 applied += 1
             }
@@ -426,8 +425,7 @@ pub async fn ensure_theme_on_verified_targets(
         let guarded_payload = guarded_payload.get_or_insert_with(|| guarded_expression(payload));
         match evaluate_many(&target, port, &[guarded_payload.as_str()]).await {
             Ok(values)
-                if probe_is_codex(values.first())
-                    && theme_install_is_confirmed(values.first()) =>
+                if probe_is_codex(values.first()) && theme_install_is_confirmed(values.first()) =>
             {
                 healthy += 1
             }
