@@ -957,16 +957,15 @@ impl RuntimeManager {
                             if failures >= 3 {
                                 let failure = error.to_string();
                                 manager
-                                    .record_cdp_failure_snapshot(
-                                        "cdp_watcher_probe_failed",
-                                        &failure,
-                                        record.port,
-                                        &record.browser_id,
-                                    )
-                                    .await;
-                                manager
                                     .mark_watcher_error(generation, &record, &failure)
                                     .await;
+                                manager
+                                    .spawn_cdp_failure_snapshot(
+                                        "cdp_watcher_probe_failed",
+                                        failure,
+                                        record.port,
+                                        record.browser_id.clone(),
+                                    );
                                 break;
                             }
                         }
@@ -1131,6 +1130,21 @@ impl RuntimeManager {
 
     fn record_log(&self, level: &str, event: &str, message: impl Into<String>, data: Value) {
         let _ = self.log.record(level, event, message, data);
+    }
+
+    fn spawn_cdp_failure_snapshot(
+        self: &Arc<Self>,
+        event: &'static str,
+        message: String,
+        port: u16,
+        browser_id: String,
+    ) {
+        let manager = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            manager
+                .record_cdp_failure_snapshot(event, &message, port, &browser_id)
+                .await;
+        });
     }
 
     async fn record_cdp_failure_snapshot(
