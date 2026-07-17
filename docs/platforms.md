@@ -23,7 +23,7 @@ LumaDrobe Desktop（React + Rust）
 - `/json/version` 的浏览器 ID用于锚定会话；身份改变后停止自动重注入
 - WebSocket 只接受同端口 loopback 地址和 `/devtools/page/<target-id>` 形状
 - 目标必须是已验证浏览器会话中的 `app://` 页面，且页面内再次确认 `app:` 协议与文档就绪；Codex 私有 class 只作为诊断提示，不作为兼容性门槛
-- Rust 内置适配器统一写入 v1 订阅 CSS 的兼容根类与背景变量，订阅源无需携带或启动 renderer 脚本
+- Rust 内置适配器统一写入 v1 订阅 CSS 的兼容根类、背景变量和必要装饰 DOM，订阅源无需携带或启动 renderer 脚本
 - 恢复操作在重新验证应用、监听者与浏览器 ID 后才关闭并重启 Codex
 - 暂停操作先持久化暂停意图并等待重注入 watcher 退出，再从已验证页面移除主题
 - 运行诊断只执行身份、进程与 CDP 只读检查，不修改 Codex 或主题状态

@@ -518,7 +518,13 @@ fn action_result_is_true(value: Option<&Value>) -> bool {
 
 fn theme_install_is_confirmed(value: Option<&Value>) -> bool {
     let result = value.and_then(|value| value.get("result"));
-    ["installed", "styleAttached", "rootTagged", "artAttached"]
+    [
+        "installed",
+        "styleAttached",
+        "rootTagged",
+        "artAttached",
+        "chromeAttached",
+    ]
         .into_iter()
         .all(|field| {
             result
@@ -539,7 +545,7 @@ fn theme_health_expression(theme_key: &str) -> AppResult<String> {
     state.ensure();
     const status = state.status();
     return Boolean(status?.installed && status?.styleAttached &&
-      status?.rootTagged && status?.artAttached);
+      status?.rootTagged && status?.artAttached && status?.chromeAttached);
   }} catch {{ return false; }}
 }})()"#
     ))
@@ -705,6 +711,7 @@ mod tests {
                 "styleAttached": true,
                 "rootTagged": true,
                 "artAttached": true,
+                "chromeAttached": true,
             }
         });
         assert!(theme_install_is_confirmed(Some(&value)));
@@ -714,9 +721,20 @@ mod tests {
                 "styleAttached": false,
                 "rootTagged": true,
                 "artAttached": true,
+                "chromeAttached": true,
             }
         });
         assert!(!theme_install_is_confirmed(Some(&missing_style)));
+        let missing_chrome = json!({
+            "result": {
+                "installed": true,
+                "styleAttached": true,
+                "rootTagged": true,
+                "artAttached": true,
+                "chromeAttached": false,
+            }
+        });
+        assert!(!theme_install_is_confirmed(Some(&missing_chrome)));
     }
 
     #[test]
