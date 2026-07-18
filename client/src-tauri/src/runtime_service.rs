@@ -195,6 +195,7 @@ impl RuntimeManager {
                 error.to_string(),
                 install.clone(),
                 record.port,
+                record.activation_pid,
                 Some(record.browser_id.clone()),
             );
             return Err(error);
@@ -318,6 +319,7 @@ impl RuntimeManager {
                         failure.clone(),
                         install.clone(),
                         active.port,
+                        active.activation_pid,
                         Some(active.browser_id.clone()),
                     );
                     return self
@@ -669,6 +671,7 @@ impl RuntimeManager {
                 failure.clone(),
                 install.clone(),
                 record.port,
+                record.activation_pid,
                 Some(record.browser_id.clone()),
             );
             let message = format!("恢复主题失败：{failure}");
@@ -1011,6 +1014,7 @@ impl RuntimeManager {
                                         failure,
                                         install.clone(),
                                         record.port,
+                                        record.activation_pid,
                                         Some(record.browser_id.clone()),
                                     );
                                 break;
@@ -1193,6 +1197,7 @@ impl RuntimeManager {
                     error.to_string(),
                     install.clone(),
                     record.port,
+                    record.activation_pid,
                     Some(record.browser_id.clone()),
                 );
                 Err(error)
@@ -1206,12 +1211,20 @@ impl RuntimeManager {
         message: String,
         install: CodexInstall,
         port: u16,
+        activation_pid: Option<u32>,
         browser_id: Option<String>,
     ) {
         let manager = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             manager
-                .record_cdp_failure_snapshot(event, &message, &install, port, browser_id.as_deref())
+                .record_cdp_failure_snapshot(
+                    event,
+                    &message,
+                    &install,
+                    port,
+                    activation_pid,
+                    browser_id.as_deref(),
+                )
                 .await;
         });
     }
@@ -1222,9 +1235,12 @@ impl RuntimeManager {
         message: &str,
         install: &CodexInstall,
         port: u16,
+        activation_pid: Option<u32>,
         browser_id: Option<&str>,
     ) {
-        let snapshot = guarded_diagnostic_snapshot(&self.http, install, port, browser_id).await;
+        let snapshot =
+            guarded_diagnostic_snapshot(&self.http, install, port, activation_pid, browser_id)
+                .await;
         self.record_log(
             "error",
             event,
@@ -1242,9 +1258,10 @@ async fn guarded_diagnostic_snapshot(
     http: &Client,
     install: &CodexInstall,
     port: u16,
+    activation_pid: Option<u32>,
     browser_id: Option<&str>,
 ) -> Value {
-    match install.verify_listener_owner(port, install.activation_pid) {
+    match install.verify_listener_owner(port, activation_pid.or(install.activation_pid)) {
         Ok(true) => cdp::diagnostic_snapshot(http, port, browser_id).await,
         Ok(false) => json!({
             "port": port,
@@ -1379,6 +1396,7 @@ async fn wait_until_ready_and_apply(
                             &http,
                             &snapshot_install,
                             port,
+                            snapshot_install.activation_pid,
                             Some(expected_browser_id.as_str()),
                         )
                         .await
@@ -1421,6 +1439,7 @@ async fn wait_until_ready_and_apply(
                     &manager.http,
                     &diagnostic_install,
                     port,
+                    diagnostic_install.activation_pid,
                     diagnostic_browser_id.as_deref(),
                 )
                 .await
