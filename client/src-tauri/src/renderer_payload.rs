@@ -11,24 +11,24 @@ const CSS_LIMIT: u64 = 1024 * 1024;
 
 const BASE_CSS: &str = r#"
 html.lumadrobe-theme {
-  color-scheme: dark;
+  color-scheme: light dark;
   --lumadrobe-panel: rgba(10, 12, 18, .84);
   --lumadrobe-line: rgba(255, 255, 255, .10);
 }
 html.lumadrobe-theme body {
   background: #090b10 var(--lumadrobe-art) center / cover fixed no-repeat !important;
 }
-html.lumadrobe-theme aside.app-shell-left-panel {
+html.lumadrobe-theme aside {
   background: linear-gradient(180deg, rgba(12, 13, 19, .96), rgba(12, 13, 19, .88)) !important;
   border-color: var(--lumadrobe-line) !important;
   backdrop-filter: blur(18px) saturate(112%) !important;
 }
-html.lumadrobe-theme main.main-surface {
+html.lumadrobe-theme main {
   background:
     linear-gradient(115deg, rgba(8, 10, 15, .94) 0%, rgba(8, 10, 15, .70) 42%, rgba(8, 10, 15, .22) 100%),
     var(--lumadrobe-art) center / cover no-repeat !important;
 }
-html.lumadrobe-theme main.main-surface [role="main"] {
+html.lumadrobe-theme [role="main"] {
   background: transparent !important;
 }
 html.lumadrobe-theme .composer-surface-chrome {
@@ -72,13 +72,19 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
     Ok(format!(
         r#"((theme, cssText, artDataUrl) => {{
   const STATE_KEY = "__LUMADROBE_RUNTIME__";
+  const RUNTIME_VERSION = 2;
   const STYLE_ID = "lumadrobe-theme-style";
+  const CHROME_ID = "codex-dream-skin-chrome";
+  const ROOT_CLASSES = ["lumadrobe-theme", "codex-dream-skin"];
+  const ART_PROPERTIES = ["--lumadrobe-art", "--dream-art", "--dream-skin-art"];
   const previous = window[STATE_KEY];
-  if (previous?.themeKey === theme.key && previous?.ensure) {{
+  if (previous?.runtimeVersion === RUNTIME_VERSION && previous?.themeKey === theme.key &&
+      previous?.ensure && previous?.status) {{
     previous.ensure();
-    return {{ installed: true, themeKey: theme.key, reused: true }};
+    return {{ ...previous.status?.(), themeKey: theme.key, reused: true }};
   }}
   previous?.cleanup?.();
+  window.__CODEX_DREAM_SKIN_STATE__?.cleanup?.();
 
   const comma = artDataUrl.indexOf(",");
   const binary = atob(artDataUrl.slice(comma + 1));
@@ -87,13 +93,163 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   const mime = artDataUrl.slice(5, comma).split(";")[0];
   const artUrl = URL.createObjectURL(new Blob([bytes], {{ type: mime }}));
   const touched = new Set();
+  const hasChromeCss = cssText.includes(`#${{CHROME_ID}}`);
+  const chromeProfile = hasChromeCss && cssText.includes(".dream-skin-brand")
+    ? "portal"
+    : hasChromeCss && cssText.includes(".dream-brand")
+      ? "pink"
+      : null;
+  const chromeSelector = chromeProfile === "portal" ? ".dream-skin-brand" : ".dream-brand";
+
+  const element = (tag, className, text) => {{
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }};
+
+  const appendDots = (parent, className, count) => {{
+    const dots = element("div", className);
+    for (let index = 0; index < count; index += 1) dots.appendChild(element("i"));
+    parent.appendChild(dots);
+  }};
+
+  const buildChrome = () => {{
+    if (!chromeProfile || !document.body) return null;
+    let chrome = document.getElementById(CHROME_ID);
+    const reusable = chrome?.dataset.lumadrobeOwned === "true" &&
+      chrome.dataset.lumadrobeProfile === chromeProfile &&
+      chrome.querySelector(chromeSelector);
+    if (!reusable) {{
+      chrome?.remove();
+      chrome = element("div");
+      chrome.id = CHROME_ID;
+      chrome.dataset.lumadrobeOwned = "true";
+      chrome.dataset.lumadrobeProfile = chromeProfile;
+      chrome.setAttribute("aria-hidden", "true");
+      if (chromeProfile === "portal") {{
+        const brand = element("div", "dream-skin-brand");
+        brand.appendChild(element("span", "dream-skin-portal-mark", "◉"));
+        const copy = element("span");
+        copy.appendChild(element("b", null, theme.name));
+        copy.appendChild(element("small", null, "LUMADROBE THEME"));
+        brand.appendChild(copy);
+        chrome.appendChild(brand);
+        const status = element("div", "dream-skin-status");
+        status.appendChild(element("i"));
+        status.appendChild(element("span", null, "THEME ONLINE"));
+        chrome.appendChild(status);
+        chrome.appendChild(element("div", "dream-skin-quote", "MAKE SOMETHING WONDERFUL"));
+        appendDots(chrome, "dream-skin-particles", 8);
+        chrome.appendChild(element("div", "dream-skin-orbit"));
+      }} else {{
+        const brand = element("div", "dream-brand");
+        brand.appendChild(element("span", "dream-note", "♫"));
+        const copy = element("span");
+        copy.appendChild(element("b", null, theme.name));
+        copy.appendChild(element("small", null, "LumaDrobe theme ✦"));
+        brand.appendChild(copy);
+        chrome.appendChild(brand);
+        chrome.appendChild(element("div", "dream-signature", `${{theme.name}} ♡`));
+        appendDots(chrome, "dream-sparkles", 6);
+        const ribbon = element("div", "dream-ribbon");
+        ribbon.appendChild(element("span", null, "♡"));
+        ribbon.appendChild(document.createTextNode("🎀"));
+        ribbon.appendChild(element("span", null, "✦"));
+        chrome.appendChild(ribbon);
+        chrome.appendChild(element("div", "dream-polaroid"));
+      }}
+      document.body.appendChild(chrome);
+    }}
+    return chrome;
+  }};
+
+  const chromeIsReady = () => {{
+    if (!chromeProfile) return true;
+    const chrome = document.getElementById(CHROME_ID);
+    return Boolean(chrome?.isConnected && chrome.dataset.lumadrobeOwned === "true" &&
+      chrome.dataset.lumadrobeProfile === chromeProfile && chrome.querySelector(chromeSelector));
+  }};
+
+  const readAppearancePreference = () => {{
+    const root = document.documentElement;
+    const classify = (value) => {{
+      const normalized = String(value || "").toLowerCase();
+      if (/\b(dark|theme-dark|appearance-dark)\b/.test(normalized)) return "dark";
+      if (/\b(light|theme-light|appearance-light)\b/.test(normalized)) return "light";
+      if (/\b(system|auto)\b/.test(normalized)) return "system";
+      return null;
+    }};
+    const checked = document.querySelector('input[name="appearance-theme"]:checked');
+    const checkedChoice = `${{checked?.getAttribute("aria-label") || ""}} ${{
+      checked?.getAttribute("value") || ""
+    }}`;
+    if (checkedChoice.includes("暗")) return "dark";
+    if (checkedChoice.includes("浅")) return "light";
+    if (checkedChoice.includes("系统")) return "system";
+    const checkedPreference = classify(checkedChoice);
+    if (checkedPreference) return checkedPreference;
+    const body = document.body;
+    const candidates = [
+      classify(body?.getAttribute("data-theme")),
+      classify(body?.getAttribute("data-appearance")),
+      classify(body?.getAttribute("data-color-mode")),
+      classify(body?.className),
+      classify(root?.getAttribute("data-theme")),
+      classify(root?.getAttribute("data-appearance")),
+      classify(root?.getAttribute("data-color-mode")),
+      classify(root?.className),
+    ];
+    return candidates.find((value) => value === "dark" || value === "light") ||
+      (candidates.includes("system") ? "system" : null);
+  }};
+
+  let mediaQuery = null;
+  try {{ mediaQuery = matchMedia("(prefers-color-scheme: dark)"); }} catch {{}}
+  const readSystemMode = () => mediaQuery?.matches ? "dark" : "light";
+  const readInitialComputedMode = () => {{
+    const root = document.documentElement;
+    try {{
+      const scheme = getComputedStyle(root).colorScheme || "";
+      if (scheme.includes("dark") && !scheme.includes("light")) return "dark";
+      if (scheme.includes("light") && !scheme.includes("dark")) return "light";
+    }} catch {{}}
+    return null;
+  }};
+
+  // The computed style is safe only before adding LumaDrobe classes or CSS.
+  // Subsequent refreshes use Codex-owned signals and matchMedia exclusively.
+  let previousPreference = readAppearancePreference();
+  let previousSystemMode = readSystemMode();
+  let shellMode = previousPreference === "dark" || previousPreference === "light"
+    ? previousPreference
+    : previousPreference === "system"
+      ? previousSystemMode
+      : readInitialComputedMode() || previousSystemMode;
+  const refreshShellMode = () => {{
+    const preference = readAppearancePreference();
+    const systemMode = readSystemMode();
+    if (preference === "dark" || preference === "light") {{
+      shellMode = preference;
+    }} else if (preference === "system") {{
+      shellMode = systemMode;
+    }} else if (previousPreference !== null || systemMode !== previousSystemMode) {{
+      shellMode = systemMode;
+    }}
+    previousPreference = preference;
+    previousSystemMode = systemMode;
+    return shellMode;
+  }};
 
   const ensure = () => {{
     const root = document.documentElement;
     if (!root) return;
-    root.classList.add("lumadrobe-theme");
+    root.classList.add(...ROOT_CLASSES);
     root.dataset.lumadrobeTheme = theme.key;
-    root.style.setProperty("--lumadrobe-art", `url("${{artUrl}}")`);
+    root.setAttribute("data-dream-shell", refreshShellMode());
+    for (const property of ART_PROPERTIES) {{
+      root.style.setProperty(property, `url("${{artUrl}}")`);
+    }}
     let style = document.getElementById(STYLE_ID);
     if (!style) {{
       style = document.createElement("style");
@@ -101,32 +257,112 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
       (document.head || root).appendChild(style);
     }}
     if (style.textContent !== cssText) style.textContent = cssText;
+    const shellMain = document.querySelector("main.main-surface") || document.querySelector("main");
+    if (shellMain) {{
+      shellMain.classList.add("lumadrobe-surface");
+      touched.add(shellMain);
+    }}
+    const homeIndicator = document.querySelector('[data-testid="home-icon"]');
+    const home = homeIndicator?.closest('[role="main"]') ||
+      Array.from(document.querySelectorAll('[role="main"]')).find((candidate) =>
+        candidate.querySelector('[data-feature="game-source"]')) || null;
+    for (const node of document.querySelectorAll(".dream-home, .dream-skin-home")) {{
+      if (node !== home) node.classList.remove("dream-home", "dream-skin-home");
+    }}
+    if (home) {{
+      home.classList.add("dream-home", "dream-skin-home");
+      touched.add(home);
+    }}
+    if (shellMain) {{
+      shellMain.classList.toggle("dream-home-shell", Boolean(home));
+      shellMain.classList.toggle("dream-skin-home-shell", Boolean(home));
+    }}
+    const chrome = shellMain ? buildChrome() : null;
+    if (chrome && shellMain) {{
+      const shellBox = shellMain.getBoundingClientRect();
+      chrome.style.left = `${{Math.round(shellBox.left)}}px`;
+      chrome.style.top = `${{Math.round(shellBox.top)}}px`;
+      chrome.style.width = `${{Math.round(shellBox.width)}}px`;
+      chrome.style.height = `${{Math.round(shellBox.height)}}px`;
+      chrome.classList.toggle("dream-home-shell", Boolean(home));
+      chrome.classList.toggle("dream-skin-home-shell", Boolean(home));
+      chrome.dataset.dreamShell = shellMode;
+    }}
     for (const node of document.querySelectorAll("main.main-surface")) {{
       node.classList.add("lumadrobe-surface");
       touched.add(node);
     }}
   }};
 
+  const status = () => {{
+    const root = document.documentElement;
+    const style = document.getElementById(STYLE_ID);
+    return {{
+      installed: Boolean(window[STATE_KEY]?.runtimeVersion === RUNTIME_VERSION &&
+        window[STATE_KEY]?.themeKey === theme.key),
+      styleAttached: Boolean(style?.isConnected && style.textContent === cssText),
+      rootTagged: Boolean(root && ROOT_CLASSES.every((name) => root.classList.contains(name))),
+      artAttached: Boolean(root && ART_PROPERTIES.every((name) => root.style.getPropertyValue(name))),
+      chromeAttached: chromeIsReady(),
+    }};
+  }};
+
   const observer = new MutationObserver(() => queueMicrotask(ensure));
   observer.observe(document.documentElement, {{ childList: true, subtree: true }});
   const timer = setInterval(ensure, 5000);
+  let mediaHandler = null;
+  if (mediaQuery) {{
+    mediaHandler = () => queueMicrotask(ensure);
+    try {{ mediaQuery.addEventListener("change", mediaHandler); }} catch {{}}
+  }}
+  const resizeHandler = () => queueMicrotask(ensure);
+  window.addEventListener("resize", resizeHandler, {{ passive: true }});
   const cleanup = () => {{
     observer.disconnect();
     clearInterval(timer);
-    document.documentElement?.classList.remove("lumadrobe-theme");
+    if (mediaQuery && mediaHandler) {{
+      try {{ mediaQuery.removeEventListener("change", mediaHandler); }} catch {{}}
+    }}
+    window.removeEventListener("resize", resizeHandler);
+    document.documentElement?.classList.remove(...ROOT_CLASSES);
     if (document.documentElement?.dataset.lumadrobeTheme === theme.key) {{
       delete document.documentElement.dataset.lumadrobeTheme;
     }}
-    document.documentElement?.style.removeProperty("--lumadrobe-art");
+    document.documentElement?.removeAttribute("data-dream-shell");
+    for (const property of ART_PROPERTIES) {{
+      document.documentElement?.style.removeProperty(property);
+    }}
     document.getElementById(STYLE_ID)?.remove();
-    for (const node of touched) node.classList?.remove("lumadrobe-surface");
+    const chrome = document.getElementById(CHROME_ID);
+    if (chrome?.dataset.lumadrobeOwned === "true") chrome.remove();
+    for (const node of touched) {{
+      node.classList?.remove(
+        "lumadrobe-surface",
+        "dream-home",
+        "dream-skin-home",
+        "dream-home-shell",
+        "dream-skin-home-shell",
+      );
+    }}
     URL.revokeObjectURL(artUrl);
     if (window[STATE_KEY]?.themeKey === theme.key) delete window[STATE_KEY];
     return true;
   }};
-  window[STATE_KEY] = {{ themeKey: theme.key, ensure, cleanup, observer, timer, artUrl }};
+  window[STATE_KEY] = {{
+    runtimeVersion: RUNTIME_VERSION,
+    themeKey: theme.key,
+    ensure,
+    status,
+    cleanup,
+    observer,
+    timer,
+    mediaQuery,
+    mediaHandler,
+    resizeHandler,
+    artUrl,
+  }};
   ensure();
-  return {{ installed: true, themeKey: theme.key, reused: false }};
+  return {{ ...status(), themeKey: theme.key, reused: false }};
 }})({theme_json}, {css_json}, {art_json})"#
     ))
 }
@@ -235,8 +471,28 @@ mod tests {
         let (root, skin) = fixture();
         let payload = build_payload(&skin).unwrap();
         assert!(payload.contains("__LUMADROBE_RUNTIME__"));
+        assert!(payload.contains("runtimeVersion: RUNTIME_VERSION"));
         assert!(payload.contains("data:image/png;base64"));
         assert!(payload.contains("source:night@1.0.0"));
+        assert!(payload.contains("codex-dream-skin"));
+        assert!(payload.contains("--dream-art"));
+        assert!(payload.contains("--dream-skin-art"));
+        assert!(payload.contains("styleAttached"));
+        assert!(payload.contains("rootTagged"));
+        assert!(payload.contains("artAttached"));
+        assert!(payload.contains("chromeAttached"));
+        assert!(payload.contains("codex-dream-skin-chrome"));
+        assert!(payload.contains("chromeIsReady"));
+        let appearance = payload
+            .find("readInitialComputedMode() || previousSystemMode")
+            .unwrap();
+        let mutation = payload.find("root.classList.add(...ROOT_CLASSES)").unwrap();
+        assert!(appearance < mutation);
+        assert!(payload.contains("root.setAttribute(\"data-dream-shell\", refreshShellMode())"));
+        assert!(payload.contains("mediaQuery.addEventListener(\"change\", mediaHandler)"));
+        assert!(payload.contains("classify(body?.getAttribute(\"data-theme\"))"));
+        assert!(payload
+            .contains("candidates.find((value) => value === \"dark\" || value === \"light\")"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

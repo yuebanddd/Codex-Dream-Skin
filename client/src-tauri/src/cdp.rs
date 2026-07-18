@@ -14,9 +14,9 @@ use url::Url;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
-const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(4);
+const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
-const DIAGNOSTIC_PROBE_LIMIT: usize = 8;
+const DIAGNOSTIC_PROBE_LIMIT: usize = 4;
 
 const PROBE_EXPRESSION: &str = r#"(() => {
   const clip = (value, limit = 80) => typeof value === 'string' ? value.slice(0, limit) : null;
@@ -33,12 +33,21 @@ const PROBE_EXPRESSION: &str = r#"(() => {
     composer: Boolean(document.querySelector('.composer-surface-chrome')),
     main: Boolean(document.querySelector('[role="main"]')),
   };
+  const security = {
+    appProtocol: location.protocol === 'app:',
+    documentReady: Boolean(document.documentElement && document.head && document.body) &&
+      (document.readyState === 'interactive' || document.readyState === 'complete'),
+  };
   const landmarks = Array.from(document.querySelectorAll(
     'main,aside,nav,header,[role="main"],[role="navigation"],[data-testid]'
   )).slice(0, 24).map(describe);
   return {
-    codex: location.protocol === 'app:' && markers.shell && markers.sidebar &&
-      (markers.composer || markers.main),
+    // Rust has already verified the signed Codex process, listener owner, browser
+    // identity, app:// target URL and loopback WebSocket path. Keep only the
+    // renderer-local, navigation-safe checks here; private CSS class names are
+    // diagnostic hints and must not become a compatibility gate.
+    codex: security.appProtocol && security.documentReady,
+    security,
     document: {
       protocol: location.protocol,
       pathname: clip(location.pathname, 160),
@@ -58,8 +67,13 @@ const PROBE_EXPRESSION: &str = r#"(() => {
 pub const REMOVE_EXPRESSION: &str = r#"(() => {
   const state = window.__LUMADROBE_RUNTIME__;
   if (state?.cleanup) return state.cleanup();
-  document.documentElement?.classList.remove('lumadrobe-theme');
-  document.documentElement?.style.removeProperty('--lumadrobe-art');
+  document.documentElement?.classList.remove('lumadrobe-theme', 'codex-dream-skin');
+  for (const property of ['--lumadrobe-art', '--dream-art', '--dream-skin-art']) {
+    document.documentElement?.style.removeProperty(property);
+  }
+  document.documentElement?.removeAttribute('data-dream-shell');
+  document.querySelectorAll('.lumadrobe-surface, .dream-home, .dream-skin-home, .dream-home-shell, .dream-skin-home-shell')
+    .forEach((node) => node.classList.remove('lumadrobe-surface', 'dream-home', 'dream-skin-home', 'dream-home-shell', 'dream-skin-home-shell'));
   document.getElementById('lumadrobe-theme-style')?.remove();
   delete window.__LUMADROBE_RUNTIME__;
   return true;
@@ -243,20 +257,7 @@ pub async fn diagnostic_snapshot(
     port: u16,
     expected_browser_id: Option<&str>,
 ) -> Value {
-    match timeout(
-        DIAGNOSTIC_TIMEOUT,
-        collect_diagnostic_snapshot(client, port, expected_browser_id),
-    )
-    .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(_) => json!({
-            "port": port,
-            "stage": "snapshotTimeout",
-            "timeoutMs": DIAGNOSTIC_TIMEOUT.as_millis(),
-            "bounded": true,
-        }),
-    }
+    collect_diagnostic_snapshot(client, port, expected_browser_id).await
 }
 
 async fn collect_diagnostic_snapshot(
@@ -319,9 +320,20 @@ async fn collect_diagnostic_snapshot(
         });
         if eligible && probed_targets < DIAGNOSTIC_PROBE_LIMIT {
             probed_targets += 1;
-            match evaluate_many(&target, port, &[PROBE_EXPRESSION]).await {
-                Ok(values) => report["probe"] = values.into_iter().next().unwrap_or(Value::Null),
-                Err(error) => report["probeError"] = Value::String(error.to_string()),
+            match timeout(
+                DIAGNOSTIC_PROBE_TIMEOUT,
+                evaluate_many(&target, port, &[PROBE_EXPRESSION]),
+            )
+            .await
+            {
+                Ok(Ok(values)) => {
+                    report["probe"] = values.into_iter().next().unwrap_or(Value::Null)
+                }
+                Ok(Err(error)) => report["probeError"] = Value::String(error.to_string()),
+                Err(_) => {
+                    report["probeTimeoutMs"] =
+                        Value::from(DIAGNOSTIC_PROBE_TIMEOUT.as_millis() as u64)
+                }
             }
         } else if eligible {
             report["probeSkipped"] = Value::String("diagnosticProbeLimit".into());
@@ -340,6 +352,8 @@ async fn collect_diagnostic_snapshot(
         "probedTargets": probed_targets,
         "targetLimit": DIAGNOSTIC_TARGET_LIMIT,
         "probeLimit": DIAGNOSTIC_PROBE_LIMIT,
+        "probeTimeoutMs": DIAGNOSTIC_PROBE_TIMEOUT.as_millis(),
+        "bounded": true,
         "targets": reports,
     })
 }
@@ -356,8 +370,15 @@ pub async fn apply_to_verified_targets(
     let guarded_payload = guarded_expression(payload);
     for target in targets {
         match evaluate_many(&target, port, &[&guarded_payload]).await {
-            Ok(values) if probe_is_codex(values.first()) => applied += 1,
-            Ok(_) => last_error = Some("页面未通过 Codex DOM 标记校验".to_string()),
+            Ok(values)
+                if probe_is_codex(values.first()) && theme_install_is_confirmed(values.first()) =>
+            {
+                applied += 1
+            }
+            Ok(values) if probe_is_codex(values.first()) => {
+                last_error = Some("主题样式未完成挂载".to_string())
+            }
+            Ok(_) => last_error = Some("页面尚未达到安全可注入状态".to_string()),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
@@ -392,7 +413,7 @@ pub async fn ensure_theme_on_verified_targets(
             }
             Ok(values) if probe_is_codex(values.first()) => {}
             Ok(_) => {
-                last_error = Some("页面未通过 Codex DOM 标记校验".to_string());
+                last_error = Some("页面尚未达到安全可注入状态".to_string());
                 continue;
             }
             Err(error) => {
@@ -403,8 +424,15 @@ pub async fn ensure_theme_on_verified_targets(
 
         let guarded_payload = guarded_payload.get_or_insert_with(|| guarded_expression(payload));
         match evaluate_many(&target, port, &[guarded_payload.as_str()]).await {
-            Ok(values) if probe_is_codex(values.first()) => healthy += 1,
-            Ok(_) => last_error = Some("页面在重注入前未通过 Codex DOM 标记校验".to_string()),
+            Ok(values)
+                if probe_is_codex(values.first()) && theme_install_is_confirmed(values.first()) =>
+            {
+                healthy += 1
+            }
+            Ok(values) if probe_is_codex(values.first()) => {
+                last_error = Some("重注入后主题样式未完成挂载".to_string())
+            }
+            Ok(_) => last_error = Some("页面在重注入前尚未达到安全可注入状态".to_string()),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
@@ -488,13 +516,37 @@ fn action_result_is_true(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
+fn theme_install_is_confirmed(value: Option<&Value>) -> bool {
+    let result = value.and_then(|value| value.get("result"));
+    [
+        "installed",
+        "styleAttached",
+        "rootTagged",
+        "artAttached",
+        "chromeAttached",
+    ]
+    .into_iter()
+    .all(|field| {
+        result
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_bool)
+            == Some(true)
+    })
+}
+
 fn theme_health_expression(theme_key: &str) -> AppResult<String> {
     let key = serde_json::to_string(theme_key)?;
     Ok(format!(
         r#"(() => {{
   const state = window.__LUMADROBE_RUNTIME__;
-  if (state?.themeKey !== {key} || typeof state?.ensure !== "function") return false;
-  try {{ state.ensure(); return true; }} catch {{ return false; }}
+  if (state?.themeKey !== {key} || typeof state?.ensure !== "function" ||
+      typeof state?.status !== "function") return false;
+  try {{
+    state.ensure();
+    const status = state.status();
+    return Boolean(status?.installed && status?.styleAttached &&
+      status?.rootTagged && status?.artAttached && status?.chromeAttached);
+  }} catch {{ return false; }}
 }})()"#
     ))
 }
@@ -630,9 +682,10 @@ mod tests {
     fn diagnostic_probe_is_bounded_and_content_free() {
         assert!(PROBE_EXPRESSION.contains("slice(0, 24)"));
         assert!(PROBE_EXPRESSION.contains("elementCount"));
-        assert_eq!(DIAGNOSTIC_TIMEOUT, Duration::from_secs(4));
+        assert!(PROBE_EXPRESSION.contains("security.appProtocol && security.documentReady"));
+        assert_eq!(DIAGNOSTIC_PROBE_TIMEOUT, Duration::from_secs(2));
         assert_eq!(DIAGNOSTIC_TARGET_LIMIT, 16);
-        assert_eq!(DIAGNOSTIC_PROBE_LIMIT, 8);
+        assert_eq!(DIAGNOSTIC_PROBE_LIMIT, 4);
         for forbidden in [
             "innerText",
             "textContent",
@@ -648,6 +701,40 @@ mod tests {
                 "diagnostic probe must not capture {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn theme_install_requires_observable_renderer_state() {
+        let value = json!({
+            "result": {
+                "installed": true,
+                "styleAttached": true,
+                "rootTagged": true,
+                "artAttached": true,
+                "chromeAttached": true,
+            }
+        });
+        assert!(theme_install_is_confirmed(Some(&value)));
+        let missing_style = json!({
+            "result": {
+                "installed": true,
+                "styleAttached": false,
+                "rootTagged": true,
+                "artAttached": true,
+                "chromeAttached": true,
+            }
+        });
+        assert!(!theme_install_is_confirmed(Some(&missing_style)));
+        let missing_chrome = json!({
+            "result": {
+                "installed": true,
+                "styleAttached": true,
+                "rootTagged": true,
+                "artAttached": true,
+                "chromeAttached": false,
+            }
+        });
+        assert!(!theme_install_is_confirmed(Some(&missing_chrome)));
     }
 
     #[test]

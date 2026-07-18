@@ -1361,7 +1361,7 @@ async fn wait_until_ready_and_apply(
                         }
                         return Ok((identity.id, count));
                     }
-                    Ok(_) => last_error = "Codex 渲染页尚未完成 DOM 初始化".into(),
+                    Ok(_) => last_error = "Codex 渲染页尚未完成文档初始化".into(),
                     Err(error) => last_error = error.to_string(),
                 }
             }
