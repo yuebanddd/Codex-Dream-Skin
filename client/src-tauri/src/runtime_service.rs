@@ -357,7 +357,9 @@ impl RuntimeManager {
                 if let Some(install) = previous_install.clone() {
                     if let Err(error) = install.stop(
                         previous_child.as_mut(),
-                        previous_record.as_ref().and_then(|record| record.activation_pid),
+                        previous_record
+                            .as_ref()
+                            .and_then(|record| record.activation_pid),
                     ) {
                         return self
                             .fail_apply_attempt(

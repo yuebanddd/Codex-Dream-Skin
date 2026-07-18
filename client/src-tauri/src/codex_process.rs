@@ -675,9 +675,9 @@ fn windows_package_root_from_executable(executable: &Path) -> AppResult<PathBuf>
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    let app_directory = executable.parent().ok_or_else(|| {
-        AppError::Runtime("已保存的 Codex Store 可执行文件路径无效".into())
-    })?;
+    let app_directory = executable
+        .parent()
+        .ok_or_else(|| AppError::Runtime("已保存的 Codex Store 可执行文件路径无效".into()))?;
     let app_name = app_directory
         .file_name()
         .and_then(|value| value.to_str())
