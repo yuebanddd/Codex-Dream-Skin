@@ -7,21 +7,20 @@ use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::thread;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use windows::core::HSTRING;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
-    COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{
     ApplicationActivationManager, IApplicationActivationManager, AO_NONE,
 };
-#[cfg(target_os = "macos")]
-use std::thread;
-#[cfg(target_os = "macos")]
-use std::time::{Duration, Instant};
 
 const EXPECTED_MAC_TEAM_ID: &str = "2DC432GLL2";
 #[cfg(target_os = "windows")]
@@ -662,9 +661,7 @@ fn build_app_user_model_id(package_family_name: &str, application_id: &str) -> A
 
 #[cfg(any(target_os = "windows", test))]
 fn cdp_activation_arguments(port: u16) -> String {
-    format!(
-        "--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}"
-    )
+    format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}")
 }
 
 #[cfg(target_os = "windows")]
@@ -673,9 +670,9 @@ fn activate_windows_store_app(app_user_model_id: &str, arguments: &str) -> AppRe
     let arguments = arguments.to_owned();
     std::thread::spawn(move || {
         let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        initialized
-            .ok()
-            .map_err(|error| AppError::Runtime(format!("无法初始化 Windows 应用激活环境：{error}")))?;
+        initialized.ok().map_err(|error| {
+            AppError::Runtime(format!("无法初始化 Windows 应用激活环境：{error}"))
+        })?;
         struct ComGuard;
         impl Drop for ComGuard {
             fn drop(&mut self) {
@@ -683,16 +680,11 @@ fn activate_windows_store_app(app_user_model_id: &str, arguments: &str) -> AppRe
             }
         }
         let _guard = ComGuard;
-        let manager: IApplicationActivationManager = unsafe {
-            CoCreateInstance(
-                &ApplicationActivationManager,
-                None,
-                CLSCTX_LOCAL_SERVER,
-            )
-        }
-        .map_err(|error| {
-            AppError::Runtime(format!("无法创建 Windows Store 应用激活管理器：{error}"))
-        })?;
+        let manager: IApplicationActivationManager =
+            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
+                .map_err(|error| {
+                AppError::Runtime(format!("无法创建 Windows Store 应用激活管理器：{error}"))
+            })?;
         unsafe {
             manager.ActivateApplication(
                 &HSTRING::from(app_user_model_id),
