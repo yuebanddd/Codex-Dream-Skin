@@ -19,7 +19,7 @@ LumaDrobe Desktop（React + Rust）
 - CDP 固定绑定 `127.0.0.1`，仅从平台首选端口后的 100 个端口中选择空闲端口
 - 每次注入前验证监听进程属于已验证的官方 Codex
 - macOS 校验 `com.openai.codex`、完整代码签名和 Team ID `2DC432GLL2`
-- Windows 只接受非开发模式、`SignatureKind=Store` 的 `OpenAI.Codex` Appx 包，并从受验证清单构造 AUMID 后由 Rust 调用系统 MSIX 激活器
+- Windows 只接受非开发模式、`SignatureKind=Store` 的 `OpenAI.Codex` Appx 包，并从受验证清单构造 AUMID 后由 Rust 调用系统 MSIX 激活器；激活 PID 的进程树还必须落在已验证包根目录内
 - `/json/version` 的浏览器 ID用于锚定会话；身份改变后停止自动重注入
 - WebSocket 只接受同端口 loopback 地址和 `/devtools/page/<target-id>` 形状
 - 目标必须是已验证浏览器会话中的 `app://` 页面，且页面内再次确认 `app:` 协议与文档就绪；Codex 私有 class 只作为诊断提示，不作为兼容性门槛

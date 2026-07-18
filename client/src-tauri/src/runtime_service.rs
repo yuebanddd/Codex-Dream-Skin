@@ -35,6 +35,8 @@ struct RuntimeRecord {
     executable: String,
     codex_identity: String,
     #[serde(default)]
+    activation_pid: Option<u32>,
+    #[serde(default)]
     paused: bool,
 }
 
@@ -353,7 +355,10 @@ impl RuntimeManager {
         } else {
             if previous_child.is_some() {
                 if let Some(install) = previous_install.clone() {
-                    if let Err(error) = install.stop(previous_child.as_mut()) {
+                    if let Err(error) = install.stop(
+                        previous_child.as_mut(),
+                        previous_record.as_ref().and_then(|record| record.activation_pid),
+                    ) {
                         return self
                             .fail_apply_attempt(
                                 &installed,
@@ -396,7 +401,7 @@ impl RuntimeManager {
                     }
                 }
             }
-            let install = match CodexInstall::discover() {
+            let mut install = match CodexInstall::discover() {
                 Ok(install) => install,
                 Err(error) => {
                     return self
@@ -488,6 +493,21 @@ impl RuntimeManager {
                         .await;
                 }
             };
+            self.record_log(
+                "info",
+                "codex_launch_activated",
+                "Verified Codex launch request was accepted",
+                json!({
+                    "platform": install.platform,
+                    "launchMethod": if install.platform == "windows" {
+                        "windowsStoreActivation"
+                    } else {
+                        "directExecutable"
+                    },
+                    "activationPid": install.activation_pid,
+                    "port": port,
+                }),
+            );
             let mut record = RuntimeRecord {
                 schema_version: RUNTIME_SCHEMA,
                 source_id: installed.source_id.clone(),
@@ -498,6 +518,7 @@ impl RuntimeManager {
                 platform: install.platform.clone(),
                 executable: install.executable.to_string_lossy().into_owned(),
                 codex_identity: install.identity.clone(),
+                activation_pid: install.activation_pid,
                 paused: false,
             };
             let ready = wait_until_ready_and_apply(self, &install, port, &payload).await;
@@ -719,7 +740,9 @@ impl RuntimeManager {
                 endpoint_verified = Some(false);
                 notes.push("保存的会话与当前官方 Codex 安装不一致".into());
             } else {
-                let owner_ok = install.verify_listener_owner(record.port).unwrap_or(false);
+                let owner_ok = install
+                    .verify_listener_owner(record.port, record.activation_pid)
+                    .unwrap_or(false);
                 listener_verified = Some(owner_ok);
                 let endpoint_ok =
                     owner_ok && verify_endpoint(&self.http, install, record).await.is_ok();
@@ -854,7 +877,7 @@ impl RuntimeManager {
             let _ = cdp::remove_from_verified_targets(&self.http, record.port, &record.browser_id)
                 .await;
         }
-        if let Err(error) = install.stop(child.as_mut()) {
+        if let Err(error) = install.stop(child.as_mut(), record.activation_pid) {
             let mut inner = self.inner.lock().await;
             inner.record = Some(record.clone());
             inner.install = Some(install);
@@ -935,7 +958,9 @@ impl RuntimeManager {
                         if changed.is_err() || *cancelled.borrow() { break; }
                     }
                     _ = ticker.tick() => {
-                        let result = match install.verify_listener_owner(record.port) {
+                        let result = match install
+                            .verify_listener_owner(record.port, record.activation_pid)
+                        {
                             Ok(true) => cdp::ensure_theme_on_verified_targets(
                                 &manager.http,
                                 record.port,
@@ -1071,7 +1096,7 @@ impl RuntimeManager {
         failure: impl Into<String>,
     ) -> AppResult<T> {
         let failure = failure.into();
-        if let Err(stop_error) = install.stop(child.as_mut()) {
+        if let Err(stop_error) = install.stop(child.as_mut(), record.activation_pid) {
             let persist_error = self.persist(Some(&record)).err();
             let message = match persist_error {
                 Some(persist_error) => format!(
@@ -1217,7 +1242,7 @@ async fn guarded_diagnostic_snapshot(
     port: u16,
     browser_id: Option<&str>,
 ) -> Value {
-    match install.verify_listener_owner(port) {
+    match install.verify_listener_owner(port, install.activation_pid) {
         Ok(true) => cdp::diagnostic_snapshot(http, port, browser_id).await,
         Ok(false) => json!({
             "port": port,
@@ -1242,6 +1267,7 @@ fn record_log_data(record: &RuntimeRecord) -> Value {
         "platform": record.platform,
         "codexIdentity": record.codex_identity,
         "executable": record.executable,
+        "activationPid": record.activation_pid,
         "paused": record.paused,
     })
 }
@@ -1282,7 +1308,7 @@ async fn verify_endpoint(
     install: &CodexInstall,
     record: &RuntimeRecord,
 ) -> AppResult<()> {
-    if !install.verify_listener_owner(record.port)? {
+    if !install.verify_listener_owner(record.port, record.activation_pid)? {
         return Err(AppError::Runtime("CDP 端口不再属于已验证的 Codex".into()));
     }
     let identity = cdp::browser_identity(http, record.port).await?;
@@ -1318,7 +1344,7 @@ async fn wait_until_ready_and_apply(
     while Instant::now() < deadline {
         match cdp::browser_identity(&manager.http, port).await {
             Ok(identity) => {
-                match install.verify_listener_owner(port) {
+                match install.verify_listener_owner(port, install.activation_pid) {
                     Ok(true) => {}
                     Ok(false) => {
                         if let Some(snapshot) = pending_snapshot.take() {
@@ -1432,6 +1458,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/ChatGPT.app/test".into(),
             codex_identity: "identity".into(),
+            activation_pid: None,
             paused: false,
         };
         let status = status_for_record("running", &record, "ok");
@@ -1449,6 +1476,7 @@ mod tests {
             version: "1".into(),
             identity: "official".into(),
             app_user_model_id: None,
+            activation_pid: None,
         };
         let mut record = RuntimeRecord {
             schema_version: 1,
@@ -1460,6 +1488,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/ChatGPT.app/test".into(),
             codex_identity: "official".into(),
+            activation_pid: None,
             paused: false,
         };
         assert!(validate_saved_install(&install, &record).is_ok());
@@ -1479,6 +1508,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/Codex.app/test".into(),
             codex_identity: "official".into(),
+            activation_pid: None,
             paused: false,
         };
         assert!(pending_launch(&record));
@@ -1499,6 +1529,7 @@ mod tests {
         }))
         .unwrap();
         assert!(!record.paused);
+        assert_eq!(record.activation_pid, None);
     }
 
     #[tokio::test]
@@ -1521,6 +1552,7 @@ mod tests {
             platform: "macos".into(),
             executable: "/Applications/ChatGPT.app/test".into(),
             codex_identity: "official".into(),
+            activation_pid: None,
             paused: false,
         };
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
@@ -1532,6 +1564,7 @@ mod tests {
             version: "1".into(),
             identity: "official".into(),
             app_user_model_id: None,
+            activation_pid: None,
         };
 
         let result: AppResult<()> = manager
