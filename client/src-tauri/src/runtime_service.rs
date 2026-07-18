@@ -465,6 +465,12 @@ impl RuntimeManager {
                     "platform": install.platform,
                     "codexIdentity": install.identity,
                     "executable": install.executable,
+                    "launchMethod": if install.platform == "windows" {
+                        "windowsStoreActivation"
+                    } else {
+                        "directExecutable"
+                    },
+                    "appUserModelId": install.app_user_model_id,
                     "port": port,
                 }),
             );
@@ -514,7 +520,7 @@ impl RuntimeManager {
                 }),
             );
             record.browser_id = browser_id;
-            (record, install, Some(child))
+            (record, install, child)
         };
 
         if let Err(error) = self.persist(Some(&record)) {
@@ -1061,11 +1067,11 @@ impl RuntimeManager {
         installed: &InstalledSkin,
         record: RuntimeRecord,
         install: CodexInstall,
-        mut child: Child,
+        mut child: Option<Child>,
         failure: impl Into<String>,
     ) -> AppResult<T> {
         let failure = failure.into();
-        if let Err(stop_error) = install.stop(Some(&mut child)) {
+        if let Err(stop_error) = install.stop(child.as_mut()) {
             let persist_error = self.persist(Some(&record)).err();
             let message = match persist_error {
                 Some(persist_error) => format!(
@@ -1076,7 +1082,7 @@ impl RuntimeManager {
                 ),
             };
             return self
-                .fail_recoverable_session(record, Some(install), Some(child), message)
+                .fail_recoverable_session(record, Some(install), child, message)
                 .await;
         }
         if let Err(relaunch_error) = install.launch_normally() {
@@ -1442,6 +1448,7 @@ mod tests {
             bundle_path: None,
             version: "1".into(),
             identity: "official".into(),
+            app_user_model_id: None,
         };
         let mut record = RuntimeRecord {
             schema_version: 1,
@@ -1524,6 +1531,7 @@ mod tests {
             bundle_path: None,
             version: "1".into(),
             identity: "official".into(),
+            app_user_model_id: None,
         };
 
         let result: AppResult<()> = manager

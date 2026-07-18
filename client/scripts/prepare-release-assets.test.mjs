@@ -19,7 +19,7 @@ const repositoryRoot = resolve(
   "../..",
 );
 const buildCommit = "a".repeat(40);
-const version = "0.5.3";
+const version = "0.5.4";
 const fixtures = [
   ["LumaDrobe-macOS-arm64", "original-arm64.dmg"],
   ["LumaDrobe-Windows-x64", "original-setup.exe"],
@@ -68,8 +68,8 @@ test("release assets use platform-explicit names and matching metadata", () => {
     assert.equal(result.status, 0, result.stderr);
 
     const expectedPackages = [
-      "LumaDrobe-v0.5.3-Windows-x64-Setup.exe",
-      "LumaDrobe-v0.5.3-macOS-arm64.dmg",
+      "LumaDrobe-v0.5.4-Windows-x64-Setup.exe",
+      "LumaDrobe-v0.5.4-macOS-arm64.dmg",
     ];
     const files = readdirSync(output);
     assert.equal(files.length, 6);

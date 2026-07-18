@@ -19,7 +19,7 @@ LumaDrobe Desktop（React + Rust）
 - CDP 固定绑定 `127.0.0.1`，仅从平台首选端口后的 100 个端口中选择空闲端口
 - 每次注入前验证监听进程属于已验证的官方 Codex
 - macOS 校验 `com.openai.codex`、完整代码签名和 Team ID `2DC432GLL2`
-- Windows 只接受非开发模式、`SignatureKind=Store` 的 `OpenAI.Codex` Appx 包
+- Windows 只接受非开发模式、`SignatureKind=Store` 的 `OpenAI.Codex` Appx 包，并从受验证清单构造 AUMID 后由 Rust 调用系统 MSIX 激活器
 - `/json/version` 的浏览器 ID用于锚定会话；身份改变后停止自动重注入
 - WebSocket 只接受同端口 loopback 地址和 `/devtools/page/<target-id>` 形状
 - 目标必须是已验证浏览器会话中的 `app://` 页面，且页面内再次确认 `app:` 协议与文档就绪；Codex 私有 class 只作为诊断提示，不作为兼容性门槛
@@ -28,7 +28,7 @@ LumaDrobe Desktop（React + Rust）
 - 暂停操作先持久化暂停意图并等待重注入 watcher 退出，再从已验证页面移除主题
 - 运行诊断只执行身份、进程与 CDP 只读检查，不修改 Codex 或主题状态
 - CDP 或页面兼容失败时自动写入受限结构指纹；每个目标单独限时并保留已完成结果，不记录页面文本、表单值、标题、查询参数或存储内容
-- Windows 的系统身份检查由客户端内部执行，辅助进程使用无控制台窗口模式，不依赖外置脚本
+- Windows 的 Codex 启动与恢复由 Rust 原生 `IApplicationActivationManager` 完成；系统身份检查由客户端内部执行，辅助进程使用无控制台窗口模式，不依赖外置脚本
 - 不修改官方应用包、`app.asar`、代码签名、API Key、Base URL 或 `~/.codex/config.toml`
 
 ## 路径速查
