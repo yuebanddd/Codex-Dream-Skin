@@ -1,4 +1,5 @@
 # Release trust boundary
+/.github/CODEOWNERS @yuebanddd
 /.signpath/ @yuebanddd
 /.github/workflows/preview-packages.yml @yuebanddd
 /client/scripts/prepare-release-assets.mjs @yuebanddd
