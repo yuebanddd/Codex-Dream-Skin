@@ -18,7 +18,7 @@ v0.5 的目标是让 LumaDrobe 可以在真实 macOS 和 Windows 环境中安装
 
 PR、`release` 分支 push 和手动 `workflow_dispatch` 都会构建，且不使用 npm 依赖缓存。`SIGNPATH_ENABLED` 未设为精确的 `true` 时，Windows 包按 unsigned 模式构建和发布；设置为 `true` 后，`release` push 先签名主程序、再打包并签名 NSIS 安装器。两个目标平台完成后会在独立的 release gate 中汇总并复验版本、提交、实际签名声明和 SHA-256；最终 Artifact 保留 14 天，送签输入仅保留 1 天。
 
-每次 PR 合并到 `release` 后，工作流都会创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。unsigned 模式会在 Release Notes 和 `BUILD-INFO.json` 明确声明未签名，不会伪装成可信发布者。SignPath 模式需要每次发布人工批准；批准后工作流验证 Windows 主程序与安装器的签名、发布者和时间戳，签名被拒绝、超时或配置缺失时不会降级发布未签名替代包。Assets 中的安装包使用可直接识别的平台文件名：
+每次 PR 合并到 `release` 后，工作流都会创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。unsigned 模式会在 Release Notes 和 `BUILD-INFO.json` 明确声明未签名，不会伪装成可信发布者；Release Notes 只使用 release gate 从已验证元数据输出的签名状态，不会在重跑 publish job 时重新读取可变仓库配置。SignPath 模式需要每次发布人工批准；批准后工作流验证 Windows 主程序与安装器的签名、发布者和时间戳，签名被拒绝、超时或配置缺失时不会降级发布未签名替代包。Assets 中的安装包使用可直接识别的平台文件名：
 
 - `LumaDrobe-v<版本>-Windows-x64-Setup.exe`
 - `LumaDrobe-v<版本>-macOS-arm64.dmg`

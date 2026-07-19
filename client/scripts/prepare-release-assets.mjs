@@ -56,6 +56,7 @@ const platforms = [
   },
 ];
 mkdirSync(outputDirectory, { recursive: true });
+let windowsSigned = null;
 
 for (const platform of platforms) {
   const directory = join(sourceDirectory, platform.artifact);
@@ -114,6 +115,9 @@ for (const platform of platforms) {
   if (checksums !== `${sha256}  ${packageName}`) {
     throw new Error(`${platform.artifact} SHA256SUMS.txt is inconsistent`);
   }
+  if (platform.artifact === "LumaDrobe-Windows-x64") {
+    windowsSigned = buildInfo.signed;
+  }
 
   copyFileSync(packagePath, join(outputDirectory, platform.releaseName));
   writeFileSync(
@@ -133,9 +137,15 @@ for (const platform of platforms) {
   );
 }
 
+if (typeof windowsSigned !== "boolean") {
+  throw new Error("Verified Windows signing state is missing");
+}
 const tag = `v${version}-preview.${runNumber}`;
 if (process.env.GITHUB_OUTPUT) {
-  appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nversion=${version}\n`);
+  appendFileSync(
+    process.env.GITHUB_OUTPUT,
+    `tag=${tag}\nversion=${version}\nwindows_signed=${windowsSigned}\n`,
+  );
 }
 process.stdout.write(
   `Prepared ${readdirSync(outputDirectory).length} assets for ${tag}.\n`,

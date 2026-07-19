@@ -69,7 +69,7 @@ function createFixture({ signedWindows = false } = {}) {
   return { temporary, source, output };
 }
 
-function prepare(fixture, requireWindowsSignature = false) {
+function prepare(fixture, requireWindowsSignature = false, githubOutput) {
   return spawnSync(
     process.execPath,
     [
@@ -85,6 +85,7 @@ function prepare(fixture, requireWindowsSignature = false) {
         GITHUB_RUN_NUMBER: "14",
         LUMADROBE_BUILD_SHA: buildCommit,
         LUMADROBE_REQUIRE_WINDOWS_SIGNATURE: String(requireWindowsSignature),
+        ...(githubOutput ? { GITHUB_OUTPUT: githubOutput } : {}),
       },
     },
   );
@@ -93,8 +94,10 @@ function prepare(fixture, requireWindowsSignature = false) {
 test("release assets allow unsigned Windows packages with explicit metadata", () => {
   const fixture = createFixture();
   try {
-    const result = prepare(fixture);
+    const githubOutput = join(fixture.temporary, "github-output");
+    const result = prepare(fixture, false, githubOutput);
     assert.equal(result.status, 0, result.stderr);
+    assert.match(readFileSync(githubOutput, "utf8"), /windows_signed=false/);
 
     const expectedPackages = [
       "LumaDrobe-v0.5.5-Windows-x64-Setup.exe",
@@ -133,8 +136,10 @@ test("release assets allow unsigned Windows packages with explicit metadata", ()
 test("release assets accept a verified SignPath Windows package", () => {
   const fixture = createFixture({ signedWindows: true });
   try {
-    const result = prepare(fixture, true);
+    const githubOutput = join(fixture.temporary, "github-output");
+    const result = prepare(fixture, true, githubOutput);
     assert.equal(result.status, 0, result.stderr);
+    assert.match(readFileSync(githubOutput, "utf8"), /windows_signed=true/);
     const metadata = JSON.parse(
       readFileSync(
         join(fixture.output, "LumaDrobe-Windows-x64-BUILD-INFO.json"),
