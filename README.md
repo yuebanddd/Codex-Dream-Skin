@@ -26,7 +26,15 @@
 | Windows x64         | `LumaDrobe-v<版本>-Windows-x64-Setup.exe` |
 | macOS Apple Silicon | `LumaDrobe-v<版本>-macOS-arm64.dmg`       |
 
-当前安装包是未签名预览版。每个平台同时提供 `BUILD-INFO.json` 和 `SHA256SUMS.txt`，用于核对构建提交和安装包哈希。
+v0.5.4 及更早版本是未签名预览版。SignPath Foundation 审核通过后，新版 Windows 安装器及其主程序将带 Authenticode 签名；发布工作流拒绝生成新的未签名 Windows Release。macOS 预览版仍未签名。每个平台同时提供 `BUILD-INFO.json` 和 `SHA256SUMS.txt`，用于核对构建提交和安装包哈希。
+
+Windows 版可通过“设置 → 应用 → 已安装的应用 → LumaDrobe → 卸载”完整移除；NSIS 安装器也会注册标准卸载入口。
+
+## Code signing policy / 代码签名政策
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+签名范围、项目角色、发布门禁与用户验证方法见 [SIGNING_POLICY.md](./SIGNING_POLICY.md)。隐私与漏洞报告规则见 [PRIVACY.md](./PRIVACY.md) 和 [SECURITY.md](./SECURITY.md)。
 
 ## 赞助商
 
@@ -107,10 +115,10 @@
 
 仓库内按平台放了现成脚本（实现细节不同，效果都是「主题化 Codex」）：
 
-| 平台 | 目录 | 入口 |
-|------|------|------|
-| Apple Silicon / Intel Mac | [`macos/`](./macos/) | 双击 `Install Codex Dream Skin.command` |
-| Windows | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
+| 平台                      | 目录                     | 入口                                                      |
+| ------------------------- | ------------------------ | --------------------------------------------------------- |
+| Apple Silicon / Intel Mac | [`macos/`](./macos/)     | 双击 `Install Codex Dream Skin.command`                   |
+| Windows                   | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
 
 更细的说明：
 
@@ -132,7 +140,7 @@
 
 ## 许可与声明
 
-- 见 [`macos/LICENSE`](./macos/LICENSE)（MIT）与 [`macos/NOTICE.md`](./macos/NOTICE.md)
+- 客户端源代码使用 [MIT License](./LICENSE)；旧版 macOS 脚本的附加声明见 [`macos/NOTICE.md`](./macos/NOTICE.md)
 - 非 OpenAI 官方产品；Codex 及相关权利归其权利人
 - 效果图中的人物 / IP 形象仅作主题示意；商用或公开再分发请自行确认肖像权与商标授权
 

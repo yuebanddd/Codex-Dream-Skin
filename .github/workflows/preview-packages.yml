@@ -6,12 +6,19 @@ on:
     branches: [release]
     paths:
       - "client/**"
+      - ".signpath/**"
       - ".github/workflows/preview-packages.yml"
       - "docs/preview-builds.md"
+      - "docs/signpath-setup.md"
+      - "LICENSE"
+      - "PRIVACY.md"
+      - "SECURITY.md"
+      - "SIGNING_POLICY.md"
   push:
     branches: [release]
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -49,10 +56,182 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run check:version
+      - name: Read Windows release version
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        id: release-version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "SignPath version must be x.y.z; received '$version'"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Generate platform icons
         run: npm run tauri -- icon src-tauri/icons/icon.png
-      - name: Build unsigned preview package
+      - name: Build unsigned macOS preview package
+        if: runner.os == 'macOS'
         run: npm run build:desktop -- --bundles ${{ matrix.bundle }}
+      - name: Build unsigned Windows PR package
+        if: runner.os == 'Windows' && github.event_name != 'push'
+        run: npm run build:desktop -- --bundles nsis
+      - name: Validate SignPath release configuration
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'SIGNPATH_API_TOKEN',
+            'SIGNPATH_ORGANIZATION_ID',
+            'SIGNPATH_PROJECT_SLUG',
+            'SIGNPATH_SIGNING_POLICY_SLUG',
+            'SIGNPATH_ARTIFACT_CONFIGURATION_SLUG'
+          )
+          $missing = @($required | Where-Object {
+            [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          })
+          if ($missing.Count -gt 0) {
+            throw "Signed Windows release is mandatory; missing SignPath configuration: $($missing -join ', ')"
+          }
+      - name: Build Windows application without bundling
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        run: npm run build:desktop -- --no-bundle
+      - name: Stage unsigned Windows application for SignPath
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'src-tauri/target/release/lumadrobe.exe'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Expected application executable was not produced: $source"
+          }
+          New-Item -ItemType Directory -Force signpath-app-input | Out-Null
+          Copy-Item -LiteralPath $source -Destination signpath-app-input/lumadrobe.exe
+      - name: Upload unsigned Windows application
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        id: unsigned-windows-app
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumaDrobe-SignPath-App-${{ github.run_id }}-${{ github.run_attempt }}
+          path: client/signpath-app-input/lumadrobe.exe
+          if-no-files-found: error
+          retention-days: 1
+      - name: Sign Windows application with SignPath Foundation
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-windows-app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ github.workspace }}/client/signpath-app-signed
+          parameters: |
+            version: ${{ toJSON(steps.release-version.outputs.version) }}
+      - name: Verify and install signed Windows application
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $matches = @(Get-ChildItem signpath-app-signed -Recurse -File -Filter lumadrobe.exe)
+          if ($matches.Count -ne 1) {
+            throw "SignPath must return exactly one lumadrobe.exe; received $($matches.Count)"
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $matches[0].FullName
+          if ($signature.Status -ne 'Valid') {
+            throw "Signed application Authenticode status is $($signature.Status): $($signature.StatusMessage)"
+          }
+          $publisher = if ($null -eq $signature.SignerCertificate) { '' } else {
+            $signature.SignerCertificate.GetNameInfo(
+              [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+              $false
+            )
+          }
+          if ($null -eq $signature.SignerCertificate -or
+              $publisher -ne 'SignPath Foundation') {
+            throw "Signed application publisher is '$publisher', not SignPath Foundation"
+          }
+          if ($null -eq $signature.TimeStamperCertificate) {
+            throw "Signed application does not contain a trusted timestamp"
+          }
+          Copy-Item -LiteralPath $matches[0].FullName -Destination src-tauri/target/release/lumadrobe.exe -Force
+          Write-Host "Verified signed application publisher: $publisher"
+      - name: Bundle signed Windows application
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        run: npm run tauri -- bundle --bundles nsis
+      - name: Stage unsigned Windows installer for SignPath
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $matches = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter *.exe)
+          if ($matches.Count -ne 1) {
+            throw "Tauri must produce exactly one NSIS installer; received $($matches.Count)"
+          }
+          New-Item -ItemType Directory -Force signpath-installer-input | Out-Null
+          Copy-Item -LiteralPath $matches[0].FullName -Destination signpath-installer-input/LumaDrobe-Setup.exe
+      - name: Upload unsigned Windows installer
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        id: unsigned-windows-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumaDrobe-SignPath-Installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: client/signpath-installer-input/LumaDrobe-Setup.exe
+          if-no-files-found: error
+          retention-days: 1
+      - name: Sign Windows installer with SignPath Foundation
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-windows-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ github.workspace }}/client/signpath-installer-signed
+          parameters: |
+            version: ${{ toJSON(steps.release-version.outputs.version) }}
+      - name: Verify and collect signed Windows installer
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $matches = @(Get-ChildItem signpath-installer-signed -Recurse -File -Filter *.exe)
+          if ($matches.Count -ne 1) {
+            throw "SignPath must return exactly one installer; received $($matches.Count)"
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $matches[0].FullName
+          if ($signature.Status -ne 'Valid') {
+            throw "Signed installer Authenticode status is $($signature.Status): $($signature.StatusMessage)"
+          }
+          $publisher = if ($null -eq $signature.SignerCertificate) { '' } else {
+            $signature.SignerCertificate.GetNameInfo(
+              [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+              $false
+            )
+          }
+          if ($null -eq $signature.SignerCertificate -or
+              $publisher -ne 'SignPath Foundation') {
+            throw "Signed installer publisher is '$publisher', not SignPath Foundation"
+          }
+          if ($null -eq $signature.TimeStamperCertificate) {
+            throw "Signed installer does not contain a trusted timestamp"
+          }
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item -LiteralPath $matches[0].FullName -Destination artifacts/LumaDrobe-Setup.exe
+          Write-Host "Verified signed installer publisher: $publisher"
       - name: Collect macOS package
         if: runner.os == 'macOS'
         shell: bash
@@ -60,12 +239,16 @@ jobs:
           mkdir -p artifacts
           find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -exec cp '{}' artifacts/ \;
       - name: Collect Windows package
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'push'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe | Copy-Item -Destination artifacts
       - name: Write build metadata and checksums
+        env:
+          LUMADROBE_SIGNED: ${{ runner.os == 'Windows' && github.event_name == 'push' && 'true' || 'false' }}
+          LUMADROBE_SIGNATURE_PROVIDER: ${{ runner.os == 'Windows' && github.event_name == 'push' && 'SignPath.io' || '' }}
+          LUMADROBE_SIGNATURE_PUBLISHER: ${{ runner.os == 'Windows' && github.event_name == 'push' && 'SignPath Foundation' || '' }}
         run: node scripts/write-build-info.mjs artifacts
       - uses: actions/upload-artifact@v4
         with:
@@ -80,6 +263,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LUMADROBE_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      LUMADROBE_REQUIRE_WINDOWS_SIGNATURE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/release' }}
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -125,7 +309,9 @@ jobs:
 
           - Windows x64：\`LumaDrobe-v${VERSION}-Windows-x64-Setup.exe\`
           - macOS Apple Silicon：\`LumaDrobe-v${VERSION}-macOS-arm64.dmg\`
-          这是由 release 提交 \`${GITHUB_SHA}\` 自动构建的未签名预览版。安装前可使用同平台的 \`SHA256SUMS.txt\` 校验文件。
+          Windows 安装包由 release 提交 \`${GITHUB_SHA}\` 自动构建，经 SignPath Foundation Authenticode 签名并通过发布门禁验证。macOS 安装包仍为未签名预览版。安装前可使用同平台的 \`SHA256SUMS.txt\` 校验文件。
+
+          **Code signing policy：** [SIGNING_POLICY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/SIGNING_POLICY.md)
           EOF
           if gh release view "$TAG" >/dev/null 2>&1; then
             EXISTING_TARGET=$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)

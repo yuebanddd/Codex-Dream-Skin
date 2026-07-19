@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.5 — 2026-07-19
+
+- Windows release 构建接入 SignPath Foundation Authenticode 双阶段签名：先签主程序，再签 NSIS 安装器
+- Release push 强制验证签名链、发布者和可信时间戳；配置缺失或验证失败时停止发布，不回退到未签名安装包
+- PR 与手动构建保持无签名，避免不受信任的变更接触签名凭据；发布元数据明确区分签名状态
+- 新增 MIT 根许可证、隐私政策、安全报告说明、代码签名政策与 SignPath 申请配置指南
+- 为签名工作流、发布元数据检查和信任政策增加明确的 CODEOWNERS 审核边界
+- 版本升级至 0.5.5
+
 ## 0.5.4 — 2026-07-18
 
 - Windows Store/MSIX 版 Codex 改用 Rust 原生 `IApplicationActivationManager` 启动，不再直接执行受保护的 `WindowsApps` 可执行文件

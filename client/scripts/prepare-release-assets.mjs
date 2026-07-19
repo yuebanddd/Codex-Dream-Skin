@@ -17,6 +17,8 @@ const packageJson = JSON.parse(readFileSync("client/package.json", "utf8"));
 const version = packageJson.version;
 const runNumber = process.env.GITHUB_RUN_NUMBER;
 const buildCommit = process.env.LUMADROBE_BUILD_SHA ?? process.env.GITHUB_SHA;
+const requireWindowsSignatureValue =
+  process.env.LUMADROBE_REQUIRE_WINDOWS_SIGNATURE ?? "false";
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
   throw new Error(`Release version must be x.y.z, received ${version}`);
@@ -29,6 +31,12 @@ if (!/^[0-9a-f]{40}$/.test(buildCommit ?? "")) {
     "LUMADROBE_BUILD_SHA or GITHUB_SHA must be a full commit SHA",
   );
 }
+if (!/^(true|false)$/.test(requireWindowsSignatureValue)) {
+  throw new Error(
+    "LUMADROBE_REQUIRE_WINDOWS_SIGNATURE must be exactly true or false",
+  );
+}
+const requireWindowsSignature = requireWindowsSignatureValue === "true";
 if (existsSync(outputDirectory)) {
   throw new Error(`${outputDirectory} already exists`);
 }
@@ -38,11 +46,13 @@ const platforms = [
     artifact: "LumaDrobe-macOS-arm64",
     extension: ".dmg",
     releaseName: `LumaDrobe-v${version}-macOS-arm64.dmg`,
+    signed: false,
   },
   {
     artifact: "LumaDrobe-Windows-x64",
     extension: ".exe",
     releaseName: `LumaDrobe-v${version}-Windows-x64-Setup.exe`,
+    signed: requireWindowsSignature,
   },
 ];
 mkdirSync(outputDirectory, { recursive: true });
@@ -73,16 +83,33 @@ for (const platform of platforms) {
   const recorded = buildInfo.artifacts?.[0];
 
   if (
+    buildInfo.schemaVersion !== 2 ||
     buildInfo.product !== "LumaDrobe" ||
     buildInfo.version !== version ||
     buildInfo.buildCommit !== buildCommit ||
-    buildInfo.signed !== false ||
+    buildInfo.signed !== platform.signed ||
     buildInfo.artifacts?.length !== 1 ||
     recorded?.name !== packageName ||
     recorded?.bytes !== contents.length ||
     recorded?.sha256 !== sha256
   ) {
     throw new Error(`${platform.artifact} BUILD-INFO.json is inconsistent`);
+  }
+  if (
+    platform.signed &&
+    (buildInfo.signature?.format !== "Authenticode" ||
+      buildInfo.signature?.provider !== "SignPath.io" ||
+      buildInfo.signature?.publisher !== "SignPath Foundation" ||
+      buildInfo.signature?.verified !== true)
+  ) {
+    throw new Error(
+      `${platform.artifact} does not contain verified SignPath Authenticode metadata`,
+    );
+  }
+  if (!platform.signed && buildInfo.signature !== null) {
+    throw new Error(
+      `${platform.artifact} must not contain signature metadata when unsigned`,
+    );
   }
   if (checksums !== `${sha256}  ${packageName}`) {
     throw new Error(`${platform.artifact} SHA256SUMS.txt is inconsistent`);

@@ -17,6 +17,33 @@
   Unofficial. Does not modify <code>.app</code> / <code>app.asar</code> / WindowsApps.
 </p>
 
+## Download the LumaDrobe desktop client
+
+Open [GitHub Releases](https://github.com/yuebanddd/Codex-Dream-Skin/releases), expand the latest release assets, and select your platform:
+
+| Platform            | Package name                                 |
+| ------------------- | -------------------------------------------- |
+| Windows x64         | `LumaDrobe-v<version>-Windows-x64-Setup.exe` |
+| macOS Apple Silicon | `LumaDrobe-v<version>-macOS-arm64.dmg`       |
+
+v0.5.4 and earlier are unsigned previews. After SignPath Foundation approval,
+new Windows installers and their application executables will carry
+Authenticode signatures; the release workflow refuses to publish a new
+unsigned Windows release. macOS previews remain unsigned. Each platform also
+ships `BUILD-INFO.json` and `SHA256SUMS.txt`.
+
+On Windows, uninstall from Settings → Apps → Installed apps → LumaDrobe; the
+NSIS installer registers the standard uninstall entry.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate
+by [SignPath Foundation](https://signpath.org/).
+
+See [SIGNING_POLICY.md](./SIGNING_POLICY.md) for scope, project roles, release
+gates, and user verification. See [PRIVACY.md](./PRIVACY.md) and
+[SECURITY.md](./SECURITY.md) for privacy and vulnerability reporting.
+
 ## Sponsors
 
 <p align="center">
@@ -97,10 +124,10 @@ One image, one mood. Real theme previews you can ship:
 
 Platform scripts are ready — different plumbing, same goal: theme Codex.
 
-| Platform | Dir | Entry |
-|------|------|------|
-| Apple Silicon / Intel Mac | [`macos/`](./macos/) | Double-click `Install Codex Dream Skin.command` |
-| Windows | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
+| Platform                  | Dir                      | Entry                                                     |
+| ------------------------- | ------------------------ | --------------------------------------------------------- |
+| Apple Silicon / Intel Mac | [`macos/`](./macos/)     | Double-click `Install Codex Dream Skin.command`           |
+| Windows                   | [`windows/`](./windows/) | `scripts/install-dream-skin.ps1` → `start-dream-skin.ps1` |
 
 More detail:
 
@@ -122,7 +149,7 @@ More detail:
 
 ## License
 
-- See [`macos/LICENSE`](./macos/LICENSE) (MIT) and [`macos/NOTICE.md`](./macos/NOTICE.md)
+- Client source code is available under the [MIT License](./LICENSE). See [`macos/NOTICE.md`](./macos/NOTICE.md) for notices applying to the legacy macOS scripts.
 - Unofficial; Codex and related rights belong to their owners.
 - People / IP art in previews is illustrative only — clear rights before commercial redistribution.
 

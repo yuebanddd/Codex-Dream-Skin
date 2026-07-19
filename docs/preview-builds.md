@@ -1,6 +1,6 @@
 # LumaDrobe 测试安装包
 
-v0.5 的目标是让 LumaDrobe 可以在真实 macOS 和 Windows 环境中安装、诊断和反馈问题。当前产物是无签名测试包，不是正式发行版。
+v0.5 的目标是让 LumaDrobe 可以在真实 macOS 和 Windows 环境中安装、诊断和反馈问题。PR 和手动运行生成无签名测试包；`release` 分支 push 必须生成通过 Authenticode 验证的 Windows 包，否则不发布 Release。macOS 产物仍为无签名测试包。
 
 ## 构建产物
 
@@ -16,9 +16,9 @@ v0.5 的目标是让 LumaDrobe 可以在真实 macOS 和 Windows 环境中安装
 - `BUILD-INFO.json`：版本、构建提交、平台、架构、文件大小和哈希
 - `SHA256SUMS.txt`：安装包 SHA-256
 
-PR、`release` 分支 push 和手动 `workflow_dispatch` 都会构建测试包，且不使用 npm 依赖缓存。macOS arm64 与 Windows x64 完成后还会在独立的 release gate 中汇总并复验发布资产；Artifact 保留 14 天。
+PR、`release` 分支 push 和手动 `workflow_dispatch` 都会构建，且不使用 npm 依赖缓存。PR 与手动运行的 Windows 包保持无签名，只用于 CI 验证；`release` push 先签名主程序、再打包并签名 NSIS 安装器。两个目标平台完成后会在独立的 release gate 中汇总并复验版本、提交、签名声明和 SHA-256；最终 Artifact 保留 14 天，送签输入仅保留 1 天。
 
-每次 PR 合并到 `release` 后，工作流会在两个目标平台构建全部成功并重新校验版本、提交和 SHA-256 后，自动创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。Release 正文会列出下载说明，Assets 中的安装包使用可直接识别的平台文件名：
+每次 PR 合并到 `release` 后，工作流会提交 SignPath 签名请求。SignPath Foundation 的免费证书要求每次发布人工批准；批准后，工作流验证 Windows 主程序与安装器的签名、发布者和时间戳，并在两个平台全部通过后创建 `v<版本>-preview.<工作流编号>` GitHub Pre-release。签名请求被拒绝、超时或配置缺失时不会发布未签名替代包。Assets 中的安装包使用可直接识别的平台文件名：
 
 - `LumaDrobe-v<版本>-Windows-x64-Setup.exe`
 - `LumaDrobe-v<版本>-macOS-arm64.dmg`
@@ -41,16 +41,18 @@ Windows PowerShell：
 ```powershell
 Get-FileHash .\LumaDrobe_*.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
+Get-AuthenticodeSignature .\LumaDrobe_*.exe | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
 ```
 
-只有哈希完全一致时才继续安装。
+Windows Release 的 `Status` 必须是 `Valid`，签名者名称必须严格等于 `SignPath Foundation`，并且必须存在时间戳证书。只有签名与哈希都符合预期时才继续安装。SHA-256 可以证明下载内容与发布资产一致，但不能代替可信发布者签名。
 
-## 无签名提示
+## 平台签名状态
 
 - macOS Gatekeeper 可能阻止首次打开。仅在确认仓库、提交和 SHA-256 后，通过“系统设置 → 隐私与安全性”对该应用选择“仍要打开”。不要全局关闭 Gatekeeper。
-- Windows SmartScreen 可能显示未知发布者。仅在确认仓库、提交和 SHA-256 后，为这个安装包单次选择继续运行。不要全局关闭 SmartScreen。
+- v0.5.4 及更早 Windows 预览版没有 Authenticode 签名，可能被 Smart App Control 直接阻止。哈希校验不能消除这一限制。
+- SignPath 审核通过后的新版 Windows Release 必须带 `SignPath Foundation` 签名。有效签名可以建立发布者信任，但 Microsoft 的云端声誉仍由系统随分发与使用逐步评估，项目无法在 GitHub Actions 中直接写入或伪造。
 
-正式发行前仍需要 Apple Developer ID、公证、Windows 代码签名和自动更新签名。
+SignPath 申请与仓库配置见 [SignPath 配置指南](./signpath-setup.md)。macOS 正式发行前仍需要 Apple Developer ID 与公证，自动更新也需要独立设计和签名。
 
 ## 实机反馈
 
