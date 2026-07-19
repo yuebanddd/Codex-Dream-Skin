@@ -1,0 +1,11 @@
+# Release trust boundary
+/.github/CODEOWNERS @yuebanddd
+/.signpath/ @yuebanddd
+/.github/workflows/preview-packages.yml @yuebanddd
+/client/scripts/prepare-release-assets.mjs @yuebanddd
+/client/scripts/write-build-info.mjs @yuebanddd
+/LICENSE @yuebanddd
+/PRIVACY.md @yuebanddd
+/SECURITY.md @yuebanddd
+/SIGNING_POLICY.md @yuebanddd
+/docs/signpath-setup.md @yuebanddd

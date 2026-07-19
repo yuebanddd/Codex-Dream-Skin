@@ -4,6 +4,29 @@ import { join } from "node:path";
 
 const directory = process.argv[2] ?? "artifacts";
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+const signedValue = process.env.LUMADROBE_SIGNED ?? "false";
+
+if (!/^(true|false)$/.test(signedValue)) {
+  throw new Error("LUMADROBE_SIGNED must be exactly true or false");
+}
+
+const signed = signedValue === "true";
+const signatureProvider = process.env.LUMADROBE_SIGNATURE_PROVIDER ?? "";
+const signaturePublisher = process.env.LUMADROBE_SIGNATURE_PUBLISHER ?? "";
+
+if (
+  signed &&
+  (signatureProvider !== "SignPath.io" ||
+    signaturePublisher !== "SignPath Foundation")
+) {
+  throw new Error(
+    "Signed builds must identify SignPath.io and SignPath Foundation",
+  );
+}
+if (!signed && (signatureProvider !== "" || signaturePublisher !== "")) {
+  throw new Error("Unsigned builds must not claim a signature provider");
+}
+
 const files = readdirSync(directory)
   .filter((name) => !["BUILD-INFO.json", "SHA256SUMS.txt"].includes(name))
   .filter((name) => statSync(join(directory, name)).isFile())
@@ -22,7 +45,7 @@ const artifacts = files.map((name) => {
   };
 });
 const buildInfo = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   product: "LumaDrobe",
   version: packageJson.version,
   buildCommit: process.env.LUMADROBE_BUILD_SHA ?? "development",
@@ -30,7 +53,15 @@ const buildInfo = {
   architecture: process.env.RUNNER_ARCH ?? process.arch,
   workflowRun: process.env.GITHUB_RUN_ID ?? null,
   createdAt: new Date().toISOString(),
-  signed: false,
+  signed,
+  signature: signed
+    ? {
+        format: "Authenticode",
+        provider: signatureProvider,
+        publisher: signaturePublisher,
+        verified: true,
+      }
+    : null,
   artifacts,
 };
 
