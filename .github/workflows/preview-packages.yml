@@ -27,6 +27,9 @@ concurrency:
 jobs:
   package:
     name: ${{ matrix.name }}
+    permissions:
+      actions: read
+      contents: read
     strategy:
       fail-fast: false
       matrix:
