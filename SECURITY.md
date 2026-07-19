@@ -24,8 +24,10 @@ want attribution and coordinated disclosure is safe.
 ## Release trust
 
 Official source and releases are published only from
-`https://github.com/yuebanddd/Codex-Dream-Skin`. Windows releases covered by
-the signing policy must have a valid Authenticode signature and timestamp. A
-checksum proves file integrity only; it does not replace a trusted signature.
+`https://github.com/yuebanddd/Codex-Dream-Skin`. Unsigned previews must declare
+`signed: false` in their build metadata. Windows releases that declare
+`signed: true` must have a valid Authenticode signature and timestamp. A
+checksum proves file integrity only; it does not replace a trusted signature
+or guarantee acceptance by Microsoft Smart App Control.
 
 See [SIGNING_POLICY.md](./SIGNING_POLICY.md) for the release and approval rules.

@@ -10,10 +10,11 @@ policy excludes Codex, third-party applications, subscribed themes, legacy
 platform scripts, documentation images, and any binary that cannot be traced to
 the exact public source commit and GitHub Actions workflow that produced it.
 
-The Windows application executable is signed before bundling. The resulting
-NSIS installer is signed in a second request. Both signatures must be valid,
-chain to a trusted root, identify `SignPath Foundation`, and contain a trusted
-timestamp before a Windows asset can reach a GitHub Release.
+When SignPath mode is enabled, the Windows application executable is signed
+before bundling and the resulting NSIS installer is signed in a second request.
+Both signatures must be valid, chain to a trusted root, identify
+`SignPath Foundation`, and contain a trusted timestamp before a signed Windows
+asset can reach a GitHub Release.
 
 ## Trusted build and release origin
 
@@ -27,8 +28,10 @@ timestamp before a Windows asset can reach a GitHub Release.
 - Publication: GitHub Pre-release attached to that same commit
 
 Pull requests build unsigned test artifacts so untrusted changes never receive
-signing credentials. A push to `release` has no unsigned fallback: missing
-SignPath configuration, a denied request, a signature mismatch, a missing
+signing credentials. Until Foundation approval is complete, release pushes may
+publish explicitly labelled unsigned previews when `SIGNPATH_ENABLED` is not
+`true`. Once the owner enables SignPath mode, there is no unsigned fallback:
+missing configuration, a denied request, a signature mismatch, a missing
 timestamp, or an asset/hash mismatch fails the workflow and prevents release.
 
 ## Project roles
@@ -49,9 +52,12 @@ the release workflow does not auto-approve requests.
 
 ## User verification
 
-Users should verify the Authenticode status, publisher, timestamp, release tag,
-build commit, and SHA-256 metadata before installation. The expected public
-publisher for a Foundation-sponsored signature is `SignPath Foundation`.
+Users should inspect `BUILD-INFO.json` first. Unsigned previews declare
+`signed: false` and provide integrity metadata without claiming publisher
+identity. Signed releases declare `signed: true`; users should then verify the
+Authenticode status, publisher, timestamp, release tag, build commit, and
+SHA-256 metadata. The expected public publisher for a Foundation-sponsored
+signature is `SignPath Foundation`.
 
 ## Privacy
 

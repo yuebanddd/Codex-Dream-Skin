@@ -2,9 +2,10 @@
 
 ## 0.5.5 — 2026-07-19
 
-- Windows release 构建接入 SignPath Foundation Authenticode 双阶段签名：先签主程序，再签 NSIS 安装器
-- Release push 强制验证签名链、发布者和可信时间戳；配置缺失或验证失败时停止发布，不回退到未签名安装包
-- PR 与手动构建保持无签名，避免不受信任的变更接触签名凭据；发布元数据明确区分签名状态
+- Windows release 构建接入可选的 SignPath Foundation Authenticode 双阶段签名：先签主程序，再签 NSIS 安装器
+- SignPath 未就绪时采用与 CC Switch 相同的 unsigned 过渡发布方式，并在 Release Notes 与构建元数据明确标记；不声称已获得 Microsoft 云端声誉
+- 设置 `SIGNPATH_ENABLED=true` 后强制验证签名链、发布者和可信时间戳；配置缺失或验证失败时停止发布，不回退到未签名安装包
+- PR 与手动构建保持无签名，避免不受信任的变更接触签名凭据；发布元数据严格区分实际签名状态
 - 新增 MIT 根许可证、隐私政策、安全报告说明、代码签名政策与 SignPath 申请配置指南
 - 为签名工作流、发布元数据检查和信任政策增加明确的 CODEOWNERS 审核边界
 - 版本升级至 0.5.5

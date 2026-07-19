@@ -45,6 +45,7 @@ jobs:
         working-directory: client
     env:
       LUMADROBE_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      LUMADROBE_SIGNPATH_ENABLED: ${{ github.event_name == 'push' && vars.SIGNPATH_ENABLED == 'true' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,7 +58,7 @@ jobs:
       - run: npm ci
       - run: npm run check:version
       - name: Read Windows release version
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         id: release-version
         shell: pwsh
         run: |
@@ -72,11 +73,11 @@ jobs:
       - name: Build unsigned macOS preview package
         if: runner.os == 'macOS'
         run: npm run build:desktop -- --bundles ${{ matrix.bundle }}
-      - name: Build unsigned Windows PR package
-        if: runner.os == 'Windows' && github.event_name != 'push'
+      - name: Build unsigned Windows package
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED != 'true'
         run: npm run build:desktop -- --bundles nsis
       - name: Validate SignPath release configuration
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         shell: pwsh
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -97,13 +98,13 @@ jobs:
             [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
           })
           if ($missing.Count -gt 0) {
-            throw "Signed Windows release is mandatory; missing SignPath configuration: $($missing -join ', ')"
+            throw "SIGNPATH_ENABLED is true but required configuration is missing: $($missing -join ', ')"
           }
       - name: Build Windows application without bundling
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         run: npm run build:desktop -- --no-bundle
       - name: Stage unsigned Windows application for SignPath
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -114,7 +115,7 @@ jobs:
           New-Item -ItemType Directory -Force signpath-app-input | Out-Null
           Copy-Item -LiteralPath $source -Destination signpath-app-input/lumadrobe.exe
       - name: Upload unsigned Windows application
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         id: unsigned-windows-app
         uses: actions/upload-artifact@v4
         with:
@@ -123,7 +124,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Sign Windows application with SignPath Foundation
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -138,7 +139,7 @@ jobs:
           parameters: |
             version: ${{ toJSON(steps.release-version.outputs.version) }}
       - name: Verify and install signed Windows application
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -166,10 +167,10 @@ jobs:
           Copy-Item -LiteralPath $matches[0].FullName -Destination src-tauri/target/release/lumadrobe.exe -Force
           Write-Host "Verified signed application publisher: $publisher"
       - name: Bundle signed Windows application
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         run: npm run tauri -- bundle --bundles nsis
       - name: Stage unsigned Windows installer for SignPath
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -180,7 +181,7 @@ jobs:
           New-Item -ItemType Directory -Force signpath-installer-input | Out-Null
           Copy-Item -LiteralPath $matches[0].FullName -Destination signpath-installer-input/LumaDrobe-Setup.exe
       - name: Upload unsigned Windows installer
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         id: unsigned-windows-installer
         uses: actions/upload-artifact@v4
         with:
@@ -189,7 +190,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Sign Windows installer with SignPath Foundation
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -204,7 +205,7 @@ jobs:
           parameters: |
             version: ${{ toJSON(steps.release-version.outputs.version) }}
       - name: Verify and collect signed Windows installer
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -239,16 +240,16 @@ jobs:
           mkdir -p artifacts
           find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -exec cp '{}' artifacts/ \;
       - name: Collect Windows package
-        if: runner.os == 'Windows' && github.event_name != 'push'
+        if: runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe | Copy-Item -Destination artifacts
       - name: Write build metadata and checksums
         env:
-          LUMADROBE_SIGNED: ${{ runner.os == 'Windows' && github.event_name == 'push' && 'true' || 'false' }}
-          LUMADROBE_SIGNATURE_PROVIDER: ${{ runner.os == 'Windows' && github.event_name == 'push' && 'SignPath.io' || '' }}
-          LUMADROBE_SIGNATURE_PUBLISHER: ${{ runner.os == 'Windows' && github.event_name == 'push' && 'SignPath Foundation' || '' }}
+          LUMADROBE_SIGNED: ${{ runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true' && 'true' || 'false' }}
+          LUMADROBE_SIGNATURE_PROVIDER: ${{ runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true' && 'SignPath.io' || '' }}
+          LUMADROBE_SIGNATURE_PUBLISHER: ${{ runner.os == 'Windows' && env.LUMADROBE_SIGNPATH_ENABLED == 'true' && 'SignPath Foundation' || '' }}
         run: node scripts/write-build-info.mjs artifacts
       - uses: actions/upload-artifact@v4
         with:
@@ -263,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LUMADROBE_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      LUMADROBE_REQUIRE_WINDOWS_SIGNATURE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/release' }}
+      LUMADROBE_REQUIRE_WINDOWS_SIGNATURE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/release' && vars.SIGNPATH_ENABLED == 'true' && 'true' || 'false' }}
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
@@ -303,14 +304,20 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release_gate.outputs.tag }}
           VERSION: ${{ needs.release_gate.outputs.version }}
+          WINDOWS_SIGNED: ${{ vars.SIGNPATH_ENABLED == 'true' && 'true' || 'false' }}
         shell: bash
         run: |
+          if [ "$WINDOWS_SIGNED" = "true" ]; then
+            WINDOWS_TRUST_NOTE="Windows 安装包由 release 提交 \`${GITHUB_SHA}\` 自动构建，经 SignPath Foundation Authenticode 签名并通过发布门禁验证。"
+          else
+            WINDOWS_TRUST_NOTE="Windows 安装包由 release 提交 \`${GITHUB_SHA}\` 自动构建，当前未使用 Authenticode 签名；Microsoft Smart App Control 仍可能阻止运行。"
+          fi
           cat > release-notes.md <<EOF
           ## 下载
 
           - Windows x64：\`LumaDrobe-v${VERSION}-Windows-x64-Setup.exe\`
           - macOS Apple Silicon：\`LumaDrobe-v${VERSION}-macOS-arm64.dmg\`
-          Windows 安装包由 release 提交 \`${GITHUB_SHA}\` 自动构建，经 SignPath Foundation Authenticode 签名并通过发布门禁验证。macOS 安装包仍为未签名预览版。安装前可使用同平台的 \`SHA256SUMS.txt\` 校验文件。
+          ${WINDOWS_TRUST_NOTE} macOS 安装包仍为未签名预览版。安装前可使用同平台的 \`SHA256SUMS.txt\` 校验文件。
 
           **Code signing policy：** [SIGNING_POLICY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/SIGNING_POLICY.md)
           EOF

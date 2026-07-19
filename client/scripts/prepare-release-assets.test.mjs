@@ -90,7 +90,7 @@ function prepare(fixture, requireWindowsSignature = false) {
   );
 }
 
-test("PR assets allow unsigned Windows packages with explicit metadata", () => {
+test("release assets allow unsigned Windows packages with explicit metadata", () => {
   const fixture = createFixture();
   try {
     const result = prepare(fixture);

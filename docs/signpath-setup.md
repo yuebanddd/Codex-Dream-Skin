@@ -1,6 +1,6 @@
 # SignPath Foundation 配置指南
 
-这个文档记录仓库所有者在 SignPath Foundation 审核通过后需要完成的外部配置。仓库中的发布工作流已经按“失败关闭”设计：配置未完成前，`release` push 的 Windows job 会失败，不会发布未知发布者安装包。
+这个文档记录仓库所有者在 SignPath Foundation 审核通过后需要完成的外部配置。审核完成前，发布工作流默认采用明确标记的 unsigned 过渡模式；设置 `SIGNPATH_ENABLED=true` 后切换为“失败关闭”，任何签名错误都会阻止 Windows Release，不能自动退回 unsigned。
 
 ## 1. 申请免费开源签名
 
@@ -37,13 +37,14 @@ GitHub `upload-artifact` 会把输入包装为 ZIP，因此 Artifact Configurati
 
 | 类型     | 名称                                   | 值                              |
 | -------- | -------------------------------------- | ------------------------------- |
+| Variable | `SIGNPATH_ENABLED`                     | 全部配置完成后精确设为 `true`   |
 | Secret   | `SIGNPATH_API_TOKEN`                   | SignPath Submitter API Token    |
 | Variable | `SIGNPATH_ORGANIZATION_ID`             | SignPath Organization ID        |
 | Variable | `SIGNPATH_PROJECT_SLUG`                | LumaDrobe Project slug          |
 | Variable | `SIGNPATH_SIGNING_POLICY_SLUG`         | Release signing policy slug     |
 | Variable | `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG` | EXE artifact configuration slug |
 
-API Token 只授予提交指定项目和策略签名请求所需的最小权限。不要把 Token 写入变量、日志、文档或仓库文件。
+API Token 只授予提交指定项目和策略签名请求所需的最小权限。不要把 Token 写入变量、日志、文档或仓库文件。先配置并复核其余五项，最后再创建 `SIGNPATH_ENABLED=true`；其他值和未设置都保持 unsigned 模式。
 
 ## 5. 首次发布验证
 
@@ -60,6 +61,6 @@ Get-AuthenticodeSignature .\LumaDrobe-v0.5.5-Windows-x64-Setup.exe |
   Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
 ```
 
-只在签名状态为 `Valid`、发布者严格等于 `SignPath Foundation` 且时间戳存在时分发。若 SignPath 尚未批准项目，请不要临时关闭签名门禁发布未签名的新版本。
+启用 SignPath 后，只在签名状态为 `Valid`、发布者严格等于 `SignPath Foundation` 且时间戳存在时分发。不要为了救活一次失败构建而把 `SIGNPATH_ENABLED` 改回 false；先修复签名配置再重跑失败 job。
 
-如果首次合并时 SignPath 申请或仓库变量尚未完成，Windows job 会按预期失败。配置完成后，重新运行该次 `release` push 的失败 job；不要使用手动 `workflow_dispatch` 代替，因为手动运行只生成无签名 CI Artifact，不会发布 Release。
+SignPath 未就绪时无需配置任何占位 Secret，`release` push 会发布明确标记为 unsigned 的预览包。配置完成并启用后，Windows job 若失败可重新运行该次 `release` push 的失败 job；不要使用手动 `workflow_dispatch` 代替，因为手动运行只生成无签名 CI Artifact，不会发布 Release。

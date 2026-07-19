@@ -26,11 +26,15 @@ Open [GitHub Releases](https://github.com/yuebanddd/Codex-Dream-Skin/releases), 
 | Windows x64         | `LumaDrobe-v<version>-Windows-x64-Setup.exe` |
 | macOS Apple Silicon | `LumaDrobe-v<version>-macOS-arm64.dmg`       |
 
-v0.5.4 and earlier are unsigned previews. After SignPath Foundation approval,
-new Windows installers and their application executables will carry
-Authenticode signatures; the release workflow refuses to publish a new
-unsigned Windows release. macOS previews remain unsigned. Each platform also
-ships `BUILD-INFO.json` and `SHA256SUMS.txt`.
+Windows and macOS packages are currently unsigned previews. The Windows build
+temporarily follows CC Switch's current unsigned Authenticode strategy: it is
+built by public GitHub Actions with an exact source commit and SHA-256 metadata,
+but does not claim to have Microsoft cloud reputation. Smart App Control may
+still block a new file.
+After SignPath Foundation approval, the repository owner can explicitly enable
+Authenticode signing; once enabled, the release gate cannot fall back to an
+unsigned package. Each platform also ships `BUILD-INFO.json` and
+`SHA256SUMS.txt`.
 
 On Windows, uninstall from Settings → Apps → Installed apps → LumaDrobe; the
 NSIS installer registers the standard uninstall entry.

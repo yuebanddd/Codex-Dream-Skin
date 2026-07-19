@@ -26,7 +26,7 @@
 | Windows x64         | `LumaDrobe-v<版本>-Windows-x64-Setup.exe` |
 | macOS Apple Silicon | `LumaDrobe-v<版本>-macOS-arm64.dmg`       |
 
-v0.5.4 及更早版本是未签名预览版。SignPath Foundation 审核通过后，新版 Windows 安装器及其主程序将带 Authenticode 签名；发布工作流拒绝生成新的未签名 Windows Release。macOS 预览版仍未签名。每个平台同时提供 `BUILD-INFO.json` 和 `SHA256SUMS.txt`，用于核对构建提交和安装包哈希。
+当前 Windows 与 macOS 安装包均为未签名预览版。Windows 暂时参考 CC Switch 当前的 unsigned Authenticode 发布策略：从公开 GitHub Actions 构建并附带提交号与 SHA-256，但不声称已经获得 Microsoft 云端声誉。Smart App Control 仍可能阻止新的 Windows 文件。SignPath Foundation 审核完成后，仓库所有者可显式启用 Authenticode 签名；启用后发布门禁不允许降级为未签名包。每个平台同时提供 `BUILD-INFO.json` 和 `SHA256SUMS.txt`。
 
 Windows 版可通过“设置 → 应用 → 已安装的应用 → LumaDrobe → 卸载”完整移除；NSIS 安装器也会注册标准卸载入口。
 
