@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4 — 2026-07-18
+
+- Windows Store/MSIX 版 Codex 改用 Rust 原生 `IApplicationActivationManager` 启动，不再直接执行受保护的 `WindowsApps` 可执行文件
+- 从已验证 Store 包的 Package Family Name 与应用清单 ID 构造 AUMID，并将 CDP 参数交给系统应用激活器
+- 主题启动和恢复原生启动统一走无控制台窗口的 Store 激活路径，避免黑框与 `os error 5` 权限错误
+- 启动日志记录激活方式与 AUMID，便于确认实机是否进入原生 MSIX 激活流程
+- 保留系统激活返回的进程 PID，并以该 PID 的进程树和已验证 Store 包根目录共同校验 CDP 监听者；兼容包内实际运行的 `codex.exe`
+- 版本升级至 0.5.4
+
 ## 0.5.3 — 2026-07-17
 
 - 渲染页安全校验不再依赖 Codex 私有 class 名，改用官方进程、监听者、浏览器身份、`app://` 目标与页面就绪状态的分层验证

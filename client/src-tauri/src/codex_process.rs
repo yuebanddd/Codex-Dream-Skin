@@ -11,6 +11,16 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
+#[cfg(target_os = "windows")]
+use windows::core::HSTRING;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Shell::{
+    ApplicationActivationManager, IApplicationActivationManager, AO_NONE,
+};
 
 const EXPECTED_MAC_TEAM_ID: &str = "2DC432GLL2";
 #[cfg(target_os = "windows")]
@@ -25,6 +35,8 @@ pub struct CodexInstall {
     pub bundle_path: Option<PathBuf>,
     pub version: String,
     pub identity: String,
+    pub app_user_model_id: Option<String>,
+    pub activation_pid: Option<u32>,
 }
 
 impl CodexInstall {
@@ -53,18 +65,35 @@ impl CodexInstall {
         }
     }
 
-    pub fn launch_with_cdp(&self, port: u16) -> AppResult<Child> {
+    pub fn launch_with_cdp(&mut self, port: u16) -> AppResult<Option<Child>> {
         #[cfg(target_os = "macos")]
-        clear_legacy_macos_jobs();
-        let mut command = Command::new(&self.executable);
-        suppress_windows_console(&mut command);
-        command
-            .arg("--remote-debugging-address=127.0.0.1")
-            .arg(format!("--remote-debugging-port={port}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command.spawn().map_err(AppError::Io)
+        {
+            clear_legacy_macos_jobs();
+            let mut command = Command::new(&self.executable);
+            command
+                .arg("--remote-debugging-address=127.0.0.1")
+                .arg(format!("--remote-debugging-port={port}"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            return command.spawn().map(Some).map_err(AppError::Io);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let app_user_model_id = self.app_user_model_id.as_deref().ok_or_else(|| {
+                AppError::Runtime("已验证的 Codex Store 包缺少应用用户模型 ID".into())
+            })?;
+            self.activation_pid = Some(activate_windows_store_app(
+                app_user_model_id,
+                &cdp_activation_arguments(port),
+            )?);
+            return Ok(None);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = port;
+            Err(AppError::Runtime("当前平台不支持启动 Codex".into()))
+        }
     }
 
     pub fn launch_normally(&self) -> AppResult<()> {
@@ -86,13 +115,10 @@ impl CodexInstall {
         }
         #[cfg(target_os = "windows")]
         {
-            let mut command = Command::new(&self.executable);
-            suppress_windows_console(&mut command);
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            command.spawn()?;
+            let app_user_model_id = self.app_user_model_id.as_deref().ok_or_else(|| {
+                AppError::Runtime("已验证的 Codex Store 包缺少应用用户模型 ID".into())
+            })?;
+            activate_windows_store_app(app_user_model_id, "")?;
             Ok(())
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -108,16 +134,17 @@ impl CodexInstall {
         }
         #[cfg(target_os = "windows")]
         {
+            let package_root = self.windows_package_root()?;
             run_windows_identity_script(
-                &self.executable,
+                package_root,
+                self.activation_pid,
                 r#"
-$expected = [IO.Path]::GetFullPath($env:LUMADROBE_CODEX_EXE)
 $running = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
   $path = $_.ExecutablePath
   if (-not $path) {
     try { $path = (Get-Process -Id $_.ProcessId -ErrorAction Stop).Path } catch { $path = $null }
   }
-  $path -and ([IO.Path]::GetFullPath($path) -ieq $expected)
+  Test-LumaDrobeCodexPath $path
 }
 if (@($running).Count -gt 0) { 'true' } else { 'false' }
 "#,
@@ -142,16 +169,18 @@ if (@($running).Count -gt 0) { 'true' } else { 'false' }
             if platform != "windows" {
                 return Ok(false);
             }
+            let executable = Path::new(executable);
+            let package_root = windows_package_root_from_executable(executable)?;
             run_windows_identity_script(
-                Path::new(executable),
+                &package_root,
+                None,
                 r#"
-$expected = [IO.Path]::GetFullPath($env:LUMADROBE_CODEX_EXE)
 $running = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
   $path = $_.ExecutablePath
   if (-not $path) {
     try { $path = (Get-Process -Id $_.ProcessId -ErrorAction Stop).Path } catch { $path = $null }
   }
-  $path -and ([IO.Path]::GetFullPath($path) -ieq $expected)
+  Test-LumaDrobeCodexPath $path
 }
 if (@($running).Count -gt 0) { 'true' } else { 'false' }
 "#,
@@ -164,22 +193,23 @@ if (@($running).Count -gt 0) { 'true' } else { 'false' }
         }
     }
 
-    pub fn verify_listener_owner(&self, port: u16) -> AppResult<bool> {
+    pub fn verify_listener_owner(&self, port: u16, activation_pid: Option<u32>) -> AppResult<bool> {
         #[cfg(target_os = "macos")]
         {
             verify_macos_listener_owner(&self.executable, port)
         }
         #[cfg(target_os = "windows")]
         {
+            let package_root = self.windows_package_root()?;
             let script = format!(
                 r#"
-$expected = [IO.Path]::GetFullPath($env:LUMADROBE_CODEX_EXE)
 $listeners = @(Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction Stop)
 if ($listeners.Count -eq 0) {{ 'false'; exit 0 }}
 foreach ($listener in $listeners) {{
   if ($listener.LocalAddress -notin @('127.0.0.1', '::1')) {{ 'false'; exit 0 }}
   $pidValue = [int]$listener.OwningProcess
-  $matched = $false
+  $matchedPackage = $false
+  $matchedAnchor = $lumadrobeActivationPid -le 0
   for ($depth = 0; $depth -lt 32 -and $pidValue -gt 1; $depth++) {{
     $process = Get-CimInstance Win32_Process -Filter "ProcessId = $pidValue" -ErrorAction SilentlyContinue
     if (-not $process) {{ break }}
@@ -187,15 +217,20 @@ foreach ($listener in $listeners) {{
     if (-not $path) {{
       try {{ $path = (Get-Process -Id $pidValue -ErrorAction Stop).Path }} catch {{ $path = $null }}
     }}
-    if ($path -and ([IO.Path]::GetFullPath($path) -ieq $expected)) {{ $matched = $true; break }}
+    if (Test-LumaDrobeCodexPath $path) {{ $matchedPackage = $true }}
+    if ($pidValue -eq $lumadrobeActivationPid) {{ $matchedAnchor = $true }}
     $pidValue = [int]$process.ParentProcessId
   }}
-  if (-not $matched) {{ 'false'; exit 0 }}
+  if (-not ($matchedPackage -and $matchedAnchor)) {{ 'false'; exit 0 }}
 }}
 'true'
 "#
             );
-            run_windows_identity_script(&self.executable, &script)
+            run_windows_identity_script(
+                package_root,
+                activation_pid.or(self.activation_pid),
+                &script,
+            )
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
@@ -204,7 +239,11 @@ foreach ($listener in $listeners) {{
         }
     }
 
-    pub fn stop(&self, mut launched_child: Option<&mut Child>) -> AppResult<()> {
+    pub fn stop(
+        &self,
+        mut launched_child: Option<&mut Child>,
+        activation_pid: Option<u32>,
+    ) -> AppResult<()> {
         #[cfg(target_os = "macos")]
         {
             clear_legacy_macos_jobs();
@@ -237,16 +276,17 @@ foreach ($listener in $listeners) {{
         }
         #[cfg(target_os = "windows")]
         {
+            let package_root = self.windows_package_root()?;
             let result = run_windows_identity_script(
-                &self.executable,
+                package_root,
+                activation_pid.or(self.activation_pid),
                 r#"
-$expected = [IO.Path]::GetFullPath($env:LUMADROBE_CODEX_EXE)
 $matches = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
   $path = $_.ExecutablePath
   if (-not $path) {
     try { $path = (Get-Process -Id $_.ProcessId -ErrorAction Stop).Path } catch { $path = $null }
   }
-  $path -and ([IO.Path]::GetFullPath($path) -ieq $expected)
+  Test-LumaDrobeCodexPath $path
 })
 foreach ($item in $matches) {
   try { (Get-Process -Id $item.ProcessId -ErrorAction Stop).CloseMainWindow() | Out-Null } catch {}
@@ -259,7 +299,7 @@ do {
 foreach ($item in $alive) {
   $path = $null
   try { $path = (Get-Process -Id $item.ProcessId -ErrorAction Stop).Path } catch {}
-  if ($path -and ([IO.Path]::GetFullPath($path) -ieq $expected)) {
+  if (Test-LumaDrobeCodexPath $path) {
     Stop-Process -Id $item.ProcessId -Force -ErrorAction Stop
   }
 }
@@ -290,6 +330,13 @@ foreach ($item in $alive) {
         } else {
             current == saved
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_package_root(&self) -> AppResult<&Path> {
+        self.bundle_path
+            .as_deref()
+            .ok_or_else(|| AppError::Runtime("缺少已验证的 Codex Store 包根目录".into()))
     }
 }
 
@@ -382,6 +429,8 @@ fn discover_macos() -> AppResult<CodexInstall> {
             bundle_path: Some(bundle),
             version,
             identity: format!("com.openai.codex/{EXPECTED_MAC_TEAM_ID}"),
+            app_user_model_id: None,
+            activation_pid: None,
         });
     }
     Err(AppError::Runtime(
@@ -543,6 +592,7 @@ struct WindowsPackage {
     version: String,
     package_full_name: String,
     package_family_name: String,
+    application_id: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -555,12 +605,18 @@ if (-not $package) { exit 3 }
 $root = "$($package.InstallLocation)"
 $exe = Join-Path $root 'app\ChatGPT.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
+$manifest = Get-AppxPackageManifest -Package $package.PackageFullName
+$application = @($manifest.Package.Applications.Application) | Where-Object {
+  ("$($_.Executable)").Replace('/', '\') -ieq 'app\ChatGPT.exe'
+} | Select-Object -First 1
+if (-not $application -or -not $application.Id) { exit 5 }
 [pscustomobject]@{
   packageRoot = $root
   executable = $exe
   version = "$($package.Version)"
   packageFullName = "$($package.PackageFullName)"
   packageFamilyName = "$($package.PackageFamilyName)"
+  applicationId = "$($application.Id)"
 } | ConvertTo-Json -Compress
 "#;
     let mut command = Command::new("powershell.exe");
@@ -597,6 +653,8 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
     {
         return Err(AppError::Runtime("Codex Store 包路径校验失败".into()));
     }
+    let app_user_model_id =
+        build_app_user_model_id(&package.package_family_name, &package.application_id)?;
     Ok(CodexInstall {
         platform: "windows".into(),
         executable,
@@ -606,15 +664,123 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { exit 4 }
             "{}/{}",
             package.package_full_name, package.package_family_name
         ),
+        app_user_model_id: Some(app_user_model_id),
+        activation_pid: None,
     })
 }
 
 #[cfg(target_os = "windows")]
-fn run_windows_identity_script(executable: &Path, script: &str) -> AppResult<bool> {
+fn windows_package_root_from_executable(executable: &Path) -> AppResult<PathBuf> {
+    let file_name = executable
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let app_directory = executable
+        .parent()
+        .ok_or_else(|| AppError::Runtime("已保存的 Codex Store 可执行文件路径无效".into()))?;
+    let app_name = app_directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !file_name.eq_ignore_ascii_case("ChatGPT.exe") || !app_name.eq_ignore_ascii_case("app") {
+        return Err(AppError::Runtime(
+            "已保存的 Codex Store 可执行文件路径无效".into(),
+        ));
+    }
+    app_directory
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| AppError::Runtime("已保存的 Codex Store 包根目录无效".into()))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn build_app_user_model_id(package_family_name: &str, application_id: &str) -> AppResult<String> {
+    let safe_component = |value: &str, max_len: usize| {
+        !value.is_empty()
+            && value.len() <= max_len
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    };
+    if !safe_component(package_family_name, 128) || !safe_component(application_id, 64) {
+        return Err(AppError::Runtime(
+            "Codex Store 包的应用用户模型 ID 无效".into(),
+        ));
+    }
+    Ok(format!("{package_family_name}!{application_id}"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn cdp_activation_arguments(port: u16) -> String {
+    format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}")
+}
+
+#[cfg(target_os = "windows")]
+fn activate_windows_store_app(app_user_model_id: &str, arguments: &str) -> AppResult<u32> {
+    let app_user_model_id = app_user_model_id.to_owned();
+    let arguments = arguments.to_owned();
+    std::thread::spawn(move || {
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        initialized.ok().map_err(|error| {
+            AppError::Runtime(format!("无法初始化 Windows 应用激活环境：{error}"))
+        })?;
+        struct ComGuard;
+        impl Drop for ComGuard {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        let _guard = ComGuard;
+        let manager: IApplicationActivationManager =
+            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
+                .map_err(|error| {
+                AppError::Runtime(format!("无法创建 Windows Store 应用激活管理器：{error}"))
+            })?;
+        unsafe {
+            manager.ActivateApplication(
+                &HSTRING::from(app_user_model_id),
+                &HSTRING::from(arguments),
+                AO_NONE,
+            )
+        }
+        .map_err(|error| AppError::Runtime(format!("Windows Store 应用激活失败：{error}")))
+    })
+    .join()
+    .map_err(|_| AppError::Runtime("Windows Store 应用激活线程异常退出".into()))?
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_identity_script(
+    package_root: &Path,
+    activation_pid: Option<u32>,
+    script: &str,
+) -> AppResult<bool> {
+    let preamble = r#"
+$lumadrobeCodexRoot = ([IO.Path]::GetFullPath($env:LUMADROBE_CODEX_ROOT)).TrimEnd(
+  [IO.Path]::DirectorySeparatorChar,
+  [IO.Path]::AltDirectorySeparatorChar
+) + [IO.Path]::DirectorySeparatorChar
+$lumadrobeActivationPid = 0
+[int]::TryParse("$env:LUMADROBE_CODEX_PID", [ref]$lumadrobeActivationPid) | Out-Null
+function Test-LumaDrobeCodexPath([string]$Path) {
+  if (-not $Path) { return $false }
+  try {
+    return ([IO.Path]::GetFullPath($Path)).StartsWith(
+      $lumadrobeCodexRoot,
+      [StringComparison]::OrdinalIgnoreCase
+    )
+  } catch { return $false }
+}
+"#;
+    let script = format!("{preamble}\n{script}");
     let mut command = Command::new("powershell.exe");
     suppress_windows_console(&mut command);
     let output = command
-        .env("LUMADROBE_CODEX_EXE", executable)
+        .env("LUMADROBE_CODEX_ROOT", package_root)
+        .env(
+            "LUMADROBE_CODEX_PID",
+            activation_pid.unwrap_or_default().to_string(),
+        )
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -622,7 +788,7 @@ fn run_windows_identity_script(executable: &Path, script: &str) -> AppResult<boo
             "-WindowStyle",
             "Hidden",
             "-Command",
-            script,
+            &script,
         ])
         .output()?;
     if !output.status.success() {
@@ -653,6 +819,8 @@ mod tests {
             bundle_path: None,
             version: "1".into(),
             identity: "test".into(),
+            app_user_model_id: Some("OpenAI.Codex_test!App".into()),
+            activation_pid: None,
         };
         assert_eq!(install.preferred_port(), 9335);
         let mac = CodexInstall {
@@ -660,6 +828,20 @@ mod tests {
             ..install
         };
         assert_eq!(mac.preferred_port(), 9341);
+    }
+
+    #[test]
+    fn windows_store_identity_and_cdp_arguments_are_strict() {
+        assert_eq!(
+            build_app_user_model_id("OpenAI.Codex_2p2nqsd0c76g0", "App").unwrap(),
+            "OpenAI.Codex_2p2nqsd0c76g0!App"
+        );
+        assert!(build_app_user_model_id("OpenAI.Codex!", "App").is_err());
+        assert!(build_app_user_model_id("OpenAI.Codex", "App With Space").is_err());
+        assert_eq!(
+            cdp_activation_arguments(9335),
+            "--remote-debugging-address=127.0.0.1 --remote-debugging-port=9335"
+        );
     }
 
     #[test]
