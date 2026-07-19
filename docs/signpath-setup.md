@@ -20,7 +20,7 @@ SignPath Foundation 会人工审核项目资格与声誉，仓库变更不能代
 4. 限制签名来源为 `.github/workflows/preview-packages.yml` 的 `release` 分支 push，以及 GitHub-hosted runner。
 5. 使用需要人工批准的 release signing policy。免费 Foundation 证书要求每次发布由 Approver 批准。
 
-工作流顶层只授予 `contents: read`，并在执行 PR 控制代码的 job 中禁用 checkout 凭据持久化。SignPath 通过只授权本仓库的 GitHub App 验证 Actions 来源并读取送签 Artifact；发布 Release 的 `contents: write` 只存在于独立的最终 publish job。
+工作流顶层只授予 `contents: read`。执行 SignPath Action 的 package job 额外拥有该 Action 读取 job 信息与送签 Artifact 所需的 `actions: read`；checkout 设置 `persist-credentials: false`，不会把 job token 写入执行 PR 控制代码的工作区 Git 配置，npm/Rust 命令也不会通过环境变量接收该 token。SignPath GitHub App 只授权本仓库，用于验证可信 Actions 来源。release gate 保持 `contents: read`，发布 Release 的 `contents: write` 只存在于独立的最终 publish job。
 
 ## 3. Artifact Configuration
 
