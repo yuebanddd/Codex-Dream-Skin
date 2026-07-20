@@ -258,9 +258,7 @@ impl CdpSession {
             };
             let parsed: Value = serde_json::from_str(text.as_str())?;
             let matching_session = match session_id {
-                Some(expected) => {
-                    parsed.get("sessionId").and_then(Value::as_str) == Some(expected)
-                }
+                Some(expected) => parsed.get("sessionId").and_then(Value::as_str) == Some(expected),
                 None => true,
             };
             if parsed.get("id").and_then(Value::as_u64) == Some(id) && matching_session {
@@ -423,13 +421,8 @@ async fn collect_diagnostic_snapshot(
             .await
             {
                 Ok(Ok(evaluation)) => {
-                    report["probe"] = evaluation
-                        .values
-                        .into_iter()
-                        .next()
-                        .unwrap_or(Value::Null);
-                    report["probeTransport"] =
-                        Value::String(evaluation.transport.as_str().into());
+                    report["probe"] = evaluation.values.into_iter().next().unwrap_or(Value::Null);
+                    report["probeTransport"] = Value::String(evaluation.transport.as_str().into());
                 }
                 Ok(Err(error)) => report["probeError"] = Value::String(error.to_string()),
                 Err(_) => {
@@ -473,15 +466,7 @@ pub async fn apply_to_verified_targets(
     let mut last_error = None;
     let guarded_payload = guarded_expression(payload);
     for target in targets {
-        match evaluate_many(
-            client,
-            &target,
-            port,
-            browser_id,
-            &[&guarded_payload],
-        )
-        .await
-        {
+        match evaluate_many(client, &target, port, browser_id, &[&guarded_payload]).await {
             Ok(evaluation)
                 if probe_is_codex(evaluation.values.first())
                     && theme_install_is_confirmed(evaluation.values.first()) =>
@@ -709,11 +694,7 @@ async fn evaluate_many_attached(
         for expression in expressions {
             values.push(
                 browser
-                    .evaluate(
-                        Some(session_id.as_str()),
-                        expression,
-                        EVALUATE_TIMEOUT,
-                    )
+                    .evaluate(Some(session_id.as_str()), expression, EVALUATE_TIMEOUT)
                     .await?,
             );
         }
