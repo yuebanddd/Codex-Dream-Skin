@@ -1,13 +1,18 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const INLINE_EXPRESSION_LIMIT_BYTES: usize = 192 * 1024;
 const ENCODED_CHUNK_BYTES: usize = 96 * 1024;
-const TRANSFER_KEY: &str = "__LUMADROBE_CDP_TRANSFER__";
+const TRANSFER_KEY_PREFIX: &str = "__LUMADROBE_CDP_TRANSFER__";
+const TRANSFER_TTL_MS: u64 = 120_000;
+static TRANSFER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub(crate) struct TransferPlan {
+    storage_key: String,
     token: String,
     sha256: String,
     original_bytes: usize,
@@ -18,6 +23,7 @@ pub(crate) struct TransferPlan {
 impl TransferPlan {
     pub(crate) fn new(expression: &str) -> Self {
         let sha256 = format!("{:x}", Sha256::digest(expression.as_bytes()));
+        let attempt_id = next_attempt_id();
         let encoded = STANDARD.encode(expression.as_bytes());
         let chunks = encoded
             .as_bytes()
@@ -25,7 +31,8 @@ impl TransferPlan {
             .map(|chunk| String::from_utf8(chunk.to_vec()).expect("base64 is ASCII"))
             .collect::<Vec<_>>();
         Self {
-            token: format!("{}-{}", &sha256[..20], expression.len()),
+            storage_key: format!("{TRANSFER_KEY_PREFIX}:{attempt_id}"),
+            token: format!("{}-{}-{attempt_id}", &sha256[..20], expression.len()),
             sha256,
             original_bytes: expression.len(),
             encoded_bytes: encoded.len(),
@@ -46,16 +53,22 @@ impl TransferPlan {
     }
 
     pub(crate) fn initialize_expression(&self) -> String {
-        let key = json_string(TRANSFER_KEY);
+        let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
         let sha256 = json_string(&self.sha256);
         let original_bytes = self.original_bytes;
         let encoded_bytes = self.encoded_bytes;
         let chunk_count = self.chunks.len();
+        let ttl_ms = TRANSFER_TTL_MS;
         format!(
             r#"(() => {{
   const key = {key};
   const token = {token};
+  const previous = globalThis[key];
+  if (previous?.cleanupTimer !== undefined) globalThis.clearTimeout(previous.cleanupTimer);
+  const cleanupTimer = globalThis.setTimeout(() => {{
+    if (globalThis[key]?.token === token) delete globalThis[key];
+  }}, {ttl_ms});
   globalThis[key] = {{
     token,
     sha256: {sha256},
@@ -63,6 +76,7 @@ impl TransferPlan {
     encodedBytes: {encoded_bytes},
     chunkCount: {chunk_count},
     chunks: [],
+    cleanupTimer,
   }};
   return {{ accepted: true, token, receivedChunks: 0 }};
 }})()"#
@@ -70,7 +84,7 @@ impl TransferPlan {
     }
 
     pub(crate) fn append_expression(&self, index: usize) -> String {
-        let key = json_string(TRANSFER_KEY);
+        let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
         let chunk = json_string(&self.chunks[index]);
         format!(
@@ -85,7 +99,7 @@ impl TransferPlan {
     }
 
     pub(crate) fn commit_expression(&self) -> String {
-        let key = json_string(TRANSFER_KEY);
+        let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
         format!(
             r#"(async () => {{
@@ -107,6 +121,7 @@ impl TransferPlan {
     const source = new TextDecoder("utf-8", {{ fatal: true }}).decode(bytes);
     return (0, eval)(source);
   }} finally {{
+    if (transfer?.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
     if (globalThis[key]?.token === token) delete globalThis[key];
   }}
 }})()"#
@@ -114,16 +129,29 @@ impl TransferPlan {
     }
 
     pub(crate) fn cleanup_expression(&self) -> String {
-        let key = json_string(TRANSFER_KEY);
+        let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
         format!(
             r#"(() => {{
   const key = {key};
-  if (globalThis[key]?.token === {token}) delete globalThis[key];
+  const transfer = globalThis[key];
+  if (transfer?.token === {token}) {{
+    if (transfer.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
+    delete globalThis[key];
+  }}
   return true;
 }})()"#
         )
     }
+}
+
+fn next_attempt_id() -> String {
+    let sequence = TRANSFER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}-{timestamp:x}-{sequence:x}", std::process::id())
 }
 
 pub(crate) fn requires_chunking(expression: &str) -> bool {
@@ -175,13 +203,29 @@ mod tests {
         let commit = plan.commit_expression();
         let cleanup = plan.cleanup_expression();
 
-        assert!(initialize.contains(TRANSFER_KEY));
+        assert!(initialize.contains(TRANSFER_KEY_PREFIX));
         assert!(initialize.contains(plan.sha256()));
         assert!(append.contains("chunk order mismatch"));
         assert!(commit.contains("crypto.subtle.digest(\"SHA-256\", bytes)"));
         assert!(commit.contains("TextDecoder(\"utf-8\", { fatal: true })"));
         assert!(commit.contains("delete globalThis[key]"));
+        assert!(commit.contains("clearTimeout(transfer.cleanupTimer)"));
         assert!(cleanup.contains("delete globalThis[key]"));
+        assert!(cleanup.contains("clearTimeout(transfer.cleanupTimer)"));
+        assert!(initialize.contains(&format!("}}, {TRANSFER_TTL_MS});")));
+    }
+
+    #[test]
+    fn retries_use_independent_storage_keys_and_tokens() {
+        let first = TransferPlan::new("same payload");
+        let second = TransferPlan::new("same payload");
+
+        assert_ne!(first.storage_key, second.storage_key);
+        assert_ne!(first.token, second.token);
+        assert!(!first
+            .append_expression(0)
+            .contains(second.storage_key.as_str()));
+        assert!(!first.cleanup_expression().contains(second.token.as_str()));
     }
 
     #[test]

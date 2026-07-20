@@ -623,7 +623,7 @@ pub async fn apply_to_verified_targets(
     let mut initialized_session_targets = 0;
     let mut uninitialized_fallback_targets = 0;
     let mut chunked_transfer_targets = 0;
-    let mut transferred_chunks = 0;
+    let mut transferred_chunks: usize = 0;
     let mut last_error = None;
     let guarded_payload = guarded_expression(payload);
     for target in targets {
