@@ -154,7 +154,8 @@ impl CdpSession {
             .path()
             .strip_prefix("/devtools/browser/")
             .filter(|value| valid_identifier(value))
-            .ok_or_else(|| AppError::Runtime("CDP 浏览器身份路径无效".into()))?;
+            .ok_or_else(|| AppError::Runtime("CDP 浏览器身份路径无效".into()))?
+            .to_string();
         if browser_id != expected_browser_id {
             return Err(AppError::Runtime(format!(
                 "CDP 浏览器身份已改变：{expected_browser_id} -> {browser_id}"
