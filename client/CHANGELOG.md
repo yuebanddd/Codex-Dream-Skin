@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.6 — 2026-07-20
+
+- Codex 页面连接后直接执行安全探针与主题注入，不再订阅未使用的 Runtime/Page 事件流，避免 Windows 渲染器在 `Runtime.enable` 上阻塞
+- 排除带 `initialRoute` 的辅助页面目标，仅向主 Codex 渲染页注入主题
+- CDP 命令超时日志增加已接收帧数、事件数与最近事件方法，不记录页面内容
+- 版本升级至 0.5.6
+
 ## 0.5.5 — 2026-07-19
 
 - Windows release 构建接入可选的 SignPath Foundation Authenticode 双阶段签名：先签主程序，再签 NSIS 安装器

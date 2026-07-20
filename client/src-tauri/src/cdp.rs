@@ -12,7 +12,6 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
 const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
@@ -118,17 +117,15 @@ impl CdpSession {
         .await
         .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
         .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
-        let mut session = Self {
+        let session = Self {
             target_id: target.id.clone(),
             stream,
             next_id: 1,
         };
-        session
-            .command("Runtime.enable", json!({}), COMMAND_TIMEOUT)
-            .await?;
-        session
-            .command("Page.enable", json!({}), COMMAND_TIMEOUT)
-            .await?;
+        // Runtime.enable and Page.enable only subscribe to domain events. Theme
+        // injection evaluates in the target's default context and does not consume
+        // those event streams. Some Codex renderer builds can stall while replaying
+        // existing Runtime contexts, so keep the session command-driven instead.
         Ok(session)
     }
 
@@ -170,18 +167,23 @@ impl CdpSession {
             })?
             .map_err(|error| AppError::Runtime(format!("发送 CDP 命令失败：{error}")))?;
 
+        let mut received_frames = 0_u64;
+        let mut event_frames = 0_u64;
+        let mut last_event_method = None;
         let response = loop {
             let next = timeout_at(deadline, self.stream.next())
                 .await
                 .map_err(|_| {
+                    let last_event = last_event_method.as_deref().unwrap_or("none");
                     AppError::Runtime(format!(
-                        "CDP 命令等待超时：{method}，目标 {}，载荷 {request_bytes} bytes",
-                        self.target_id
+                        "CDP 命令等待超时：{method}，目标 {}，载荷 {request_bytes} bytes，已接收 {received_frames} 帧（事件 {event_frames}），最近事件 {last_event}",
+                        self.target_id,
                     ))
                 })?;
             let message = next
                 .ok_or_else(|| AppError::Runtime("CDP WebSocket 已关闭".into()))?
                 .map_err(|error| AppError::Runtime(format!("CDP WebSocket 错误：{error}")))?;
+            received_frames = received_frames.saturating_add(1);
             let text = match message {
                 Message::Text(text) => text,
                 Message::Close(_) => {
@@ -192,6 +194,10 @@ impl CdpSession {
             let parsed: Value = serde_json::from_str(text.as_str())?;
             if parsed.get("id").and_then(Value::as_u64) == Some(id) {
                 break parsed;
+            }
+            if let Some(event) = parsed.get("method").and_then(Value::as_str) {
+                event_frames = event_frames.saturating_add(1);
+                last_event_method = Some(event.chars().take(96).collect::<String>());
             }
         };
         if let Some(error) = response.get("error") {
@@ -558,8 +564,15 @@ fn guarded_expression(action: &str) -> String {
 }
 
 fn valid_page_target(target: &CdpTarget, port: u16) -> bool {
+    let Ok(document_url) = Url::parse(&target.url) else {
+        return false;
+    };
+    let has_initial_route = document_url
+        .query_pairs()
+        .any(|(key, _)| key.eq_ignore_ascii_case("initialRoute"));
     target.target_type == "page"
-        && target.url.starts_with("app://")
+        && document_url.scheme() == "app"
+        && !has_initial_route
         && valid_identifier(&target.id)
         && validated_page_url(target, port).is_ok()
 }
@@ -660,6 +673,19 @@ mod tests {
         item.url = "app://codex/home".into();
         item.id = "../browser".into();
         assert!(!valid_page_target(&item, 9341));
+    }
+
+    #[test]
+    fn rejects_secondary_initial_route_targets() {
+        let mut item = target("ws://127.0.0.1:9341/devtools/page/page-1");
+        item.url = "app://-/index.html?initialRoute=settings".into();
+        assert!(!valid_page_target(&item, 9341));
+
+        item.url = "app://-/index.html?INITIALROUTE=settings".into();
+        assert!(!valid_page_target(&item, 9341));
+
+        item.url = "app://-/index.html?route=settings".into();
+        assert!(valid_page_target(&item, 9341));
     }
 
     #[test]
