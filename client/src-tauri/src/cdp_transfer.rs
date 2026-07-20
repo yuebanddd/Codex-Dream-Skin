@@ -87,12 +87,19 @@ impl TransferPlan {
         let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
         let chunk = json_string(&self.chunks[index]);
+        let ttl_ms = TRANSFER_TTL_MS;
         format!(
             r#"(() => {{
-  const transfer = globalThis[{key}];
-  if (!transfer || transfer.token !== {token}) throw new Error("LumaDrobe transfer token mismatch");
+  const key = {key};
+  const token = {token};
+  const transfer = globalThis[key];
+  if (!transfer || transfer.token !== token) throw new Error("LumaDrobe transfer token mismatch");
   if (transfer.chunks.length !== {index}) throw new Error("LumaDrobe transfer chunk order mismatch");
   transfer.chunks.push({chunk});
+  if (transfer.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
+  transfer.cleanupTimer = globalThis.setTimeout(() => {{
+    if (globalThis[key]?.token === token) delete globalThis[key];
+  }}, {ttl_ms});
   return {{ accepted: true, token: transfer.token, receivedChunks: transfer.chunks.length }};
 }})()"#
         )
@@ -206,6 +213,8 @@ mod tests {
         assert!(initialize.contains(TRANSFER_KEY_PREFIX));
         assert!(initialize.contains(plan.sha256()));
         assert!(append.contains("chunk order mismatch"));
+        assert!(append.contains("clearTimeout(transfer.cleanupTimer)"));
+        assert!(append.contains(&format!("}}, {TRANSFER_TTL_MS});")));
         assert!(commit.contains("crypto.subtle.digest(\"SHA-256\", bytes)"));
         assert!(commit.contains("TextDecoder(\"utf-8\", { fatal: true })"));
         assert!(commit.contains("delete globalThis[key]"));
