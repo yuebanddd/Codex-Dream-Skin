@@ -343,6 +343,8 @@ impl RuntimeManager {
                     "verifiedTargets": injection.applied_targets,
                     "directPageTargets": injection.direct_targets,
                     "browserSessionTargets": injection.browser_session_targets,
+                    "initializedSessionTargets": injection.initialized_session_targets,
+                    "uninitializedFallbackTargets": injection.uninitialized_fallback_targets,
                 }),
             );
             (
@@ -546,6 +548,8 @@ impl RuntimeManager {
                     "verifiedTargets": injection.applied_targets,
                     "directPageTargets": injection.direct_targets,
                     "browserSessionTargets": injection.browser_session_targets,
+                    "initializedSessionTargets": injection.initialized_session_targets,
+                    "uninitializedFallbackTargets": injection.uninitialized_fallback_targets,
                 }),
             );
             record.browser_id = browser_id;

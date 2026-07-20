@@ -19,7 +19,7 @@ const repositoryRoot = resolve(
   "../..",
 );
 const buildCommit = "a".repeat(40);
-const version = "0.5.7";
+const version = "0.5.8";
 const fixtures = [
   ["LumaDrobe-macOS-arm64", "original-arm64.dmg"],
   ["LumaDrobe-Windows-x64", "original-setup.exe"],
@@ -100,8 +100,8 @@ test("release assets allow unsigned Windows packages with explicit metadata", ()
     assert.match(readFileSync(githubOutput, "utf8"), /windows_signed=false/);
 
     const expectedPackages = [
-      "LumaDrobe-v0.5.7-Windows-x64-Setup.exe",
-      "LumaDrobe-v0.5.7-macOS-arm64.dmg",
+      "LumaDrobe-v0.5.8-Windows-x64-Setup.exe",
+      "LumaDrobe-v0.5.8-macOS-arm64.dmg",
     ];
     const files = readdirSync(fixture.output);
     assert.equal(files.length, 6);
