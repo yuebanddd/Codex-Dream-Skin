@@ -303,7 +303,7 @@ impl RuntimeManager {
         }
 
         let (record, install, child) = if let Some((active, install)) = reuse {
-            let applied_targets = match cdp::apply_to_verified_targets(
+            let injection = match cdp::apply_to_verified_targets(
                 &self.http,
                 active.port,
                 &active.browser_id,
@@ -311,7 +311,7 @@ impl RuntimeManager {
             )
             .await
             {
-                Ok(count) => count,
+                Ok(outcome) => outcome,
                 Err(error) => {
                     let failure = error.to_string();
                     self.spawn_cdp_failure_snapshot(
@@ -340,7 +340,9 @@ impl RuntimeManager {
                 json!({
                     "port": active.port,
                     "browserId": active.browser_id,
-                    "verifiedTargets": applied_targets,
+                    "verifiedTargets": injection.applied_targets,
+                    "directPageTargets": injection.direct_targets,
+                    "browserSessionTargets": injection.browser_session_targets,
                 }),
             );
             (
@@ -526,7 +528,7 @@ impl RuntimeManager {
                 paused: false,
             };
             let ready = wait_until_ready_and_apply(self, &install, port, &payload).await;
-            let (browser_id, applied_targets) = match ready {
+            let (browser_id, injection) = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
                     return self
@@ -541,7 +543,9 @@ impl RuntimeManager {
                 json!({
                     "port": port,
                     "browserId": browser_id,
-                    "verifiedTargets": applied_targets,
+                    "verifiedTargets": injection.applied_targets,
+                    "directPageTargets": injection.direct_targets,
+                    "browserSessionTargets": injection.browser_session_targets,
                 }),
             );
             record.browser_id = browser_id;
@@ -1354,7 +1358,7 @@ async fn wait_until_ready_and_apply(
     install: &CodexInstall,
     port: u16,
     payload: &str,
-) -> AppResult<(String, usize)> {
+) -> AppResult<(String, cdp::CdpApplyOutcome)> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
     let mut last_browser_id = None;
@@ -1407,11 +1411,11 @@ async fn wait_until_ready_and_apply(
                 match cdp::apply_to_verified_targets(&manager.http, port, &identity.id, payload)
                     .await
                 {
-                    Ok(count) if count > 0 => {
+                    Ok(outcome) if outcome.applied_targets > 0 => {
                         if let Some(snapshot) = pending_snapshot.take() {
                             snapshot.abort();
                         }
-                        return Ok((identity.id, count));
+                        return Ok((identity.id, outcome));
                     }
                     Ok(_) => last_error = "Codex 渲染页尚未完成文档初始化".into(),
                     Err(error) => last_error = error.to_string(),
