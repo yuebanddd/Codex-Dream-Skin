@@ -1,5 +1,6 @@
 mod atomic_file;
 mod cdp;
+mod cdp_transfer;
 mod codex_process;
 mod commands;
 mod error;
