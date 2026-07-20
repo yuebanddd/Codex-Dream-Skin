@@ -571,6 +571,7 @@ fn valid_page_target(target: &CdpTarget, port: u16) -> bool {
         .query_pairs()
         .any(|(key, _)| key.eq_ignore_ascii_case("initialRoute"));
     target.target_type == "page"
+        && target.url.starts_with("app://")
         && document_url.scheme() == "app"
         && !has_initial_route
         && valid_identifier(&target.id)
@@ -669,6 +670,10 @@ mod tests {
     fn rejects_non_app_targets_and_unsafe_ids() {
         let mut item = target("ws://127.0.0.1:9341/devtools/page/page-1");
         item.url = "https://example.com".into();
+        assert!(!valid_page_target(&item, 9341));
+        item.url = "app:settings".into();
+        assert!(!valid_page_target(&item, 9341));
+        item.url = "app:index.html".into();
         assert!(!valid_page_target(&item, 9341));
         item.url = "app://codex/home".into();
         item.id = "../browser".into();
