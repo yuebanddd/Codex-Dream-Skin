@@ -126,9 +126,30 @@ impl CdpTransport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererSessionMode {
+    Initialized,
+    UninitializedFallback,
+}
+
+impl RendererSessionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Initialized => "initialized",
+            Self::UninitializedFallback => "uninitializedFallback",
+        }
+    }
+}
+
 struct CdpEvaluation {
     values: Vec<Value>,
     transport: CdpTransport,
+    session_mode: RendererSessionMode,
+}
+
+struct SessionEvaluation {
+    values: Vec<Value>,
+    mode: RendererSessionMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +157,8 @@ pub struct CdpApplyOutcome {
     pub applied_targets: usize,
     pub direct_targets: usize,
     pub browser_session_targets: usize,
+    pub initialized_session_targets: usize,
+    pub uninitialized_fallback_targets: usize,
 }
 
 impl CdpSession {
@@ -436,6 +459,8 @@ async fn collect_diagnostic_snapshot(
                 Ok(Ok(evaluation)) => {
                     report["probe"] = evaluation.values.into_iter().next().unwrap_or(Value::Null);
                     report["probeTransport"] = Value::String(evaluation.transport.as_str().into());
+                    report["probeSessionMode"] =
+                        Value::String(evaluation.session_mode.as_str().into());
                 }
                 Ok(Err(error)) => report["probeError"] = Value::String(error.to_string()),
                 Err(_) => {
@@ -476,6 +501,8 @@ pub async fn apply_to_verified_targets(
     let mut applied = 0;
     let mut direct_targets = 0;
     let mut browser_session_targets = 0;
+    let mut initialized_session_targets = 0;
+    let mut uninitialized_fallback_targets = 0;
     let mut last_error = None;
     let guarded_payload = guarded_expression(payload);
     for target in targets {
@@ -488,6 +515,12 @@ pub async fn apply_to_verified_targets(
                 match evaluation.transport {
                     CdpTransport::DirectPage => direct_targets += 1,
                     CdpTransport::BrowserSession => browser_session_targets += 1,
+                }
+                match evaluation.session_mode {
+                    RendererSessionMode::Initialized => initialized_session_targets += 1,
+                    RendererSessionMode::UninitializedFallback => {
+                        uninitialized_fallback_targets += 1
+                    }
                 }
             }
             Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
@@ -507,6 +540,8 @@ pub async fn apply_to_verified_targets(
         applied_targets: applied,
         direct_targets,
         browser_session_targets,
+        initialized_session_targets,
+        uninitialized_fallback_targets,
     })
 }
 
@@ -627,18 +662,20 @@ async fn evaluate_many(
     expressions: &[&str],
 ) -> AppResult<CdpEvaluation> {
     let direct_error = match evaluate_many_direct(target, port, expressions).await {
-        Ok(values) => {
+        Ok(evaluation) => {
             return Ok(CdpEvaluation {
-                values,
+                values: evaluation.values,
                 transport: CdpTransport::DirectPage,
+                session_mode: evaluation.mode,
             })
         }
         Err(error) => error,
     };
     match evaluate_many_attached(client, target, port, browser_id, expressions).await {
-        Ok(values) => Ok(CdpEvaluation {
-            values,
+        Ok(evaluation) => Ok(CdpEvaluation {
+            values: evaluation.values,
             transport: CdpTransport::BrowserSession,
+            session_mode: evaluation.mode,
         }),
         Err(browser_error) => Err(AppError::Runtime(format!(
             "CDP 页面直连与浏览器会话均失败；页面直连：{direct_error}；浏览器会话：{browser_error}"
@@ -650,9 +687,38 @@ async fn evaluate_many_direct(
     target: &CdpTarget,
     port: u16,
     expressions: &[&str],
+) -> AppResult<SessionEvaluation> {
+    let initialized_error =
+        match evaluate_many_direct_attempt(target, port, expressions, true).await {
+            Ok(values) => {
+                return Ok(SessionEvaluation {
+                    values,
+                    mode: RendererSessionMode::Initialized,
+                })
+            }
+            Err(error) => error,
+        };
+    match evaluate_many_direct_attempt(target, port, expressions, false).await {
+        Ok(values) => Ok(SessionEvaluation {
+            values,
+            mode: RendererSessionMode::UninitializedFallback,
+        }),
+        Err(fallback_error) => Err(AppError::Runtime(format!(
+            "页面初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{fallback_error}"
+        ))),
+    }
+}
+
+async fn evaluate_many_direct_attempt(
+    target: &CdpTarget,
+    port: u16,
+    expressions: &[&str],
+    initialize: bool,
 ) -> AppResult<Vec<Value>> {
     let mut session = CdpSession::connect_page(target, port).await?;
-    session.initialize_renderer(None).await?;
+    if initialize {
+        session.initialize_renderer(None).await?;
+    }
     let probe = session
         .evaluate(None, PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT)
         .await?;
@@ -675,6 +741,38 @@ async fn evaluate_many_attached(
     port: u16,
     browser_id: &str,
     expressions: &[&str],
+) -> AppResult<SessionEvaluation> {
+    let initialized_error =
+        match evaluate_many_attached_attempt(client, target, port, browser_id, expressions, true)
+            .await
+        {
+            Ok(values) => {
+                return Ok(SessionEvaluation {
+                    values,
+                    mode: RendererSessionMode::Initialized,
+                })
+            }
+            Err(error) => error,
+        };
+    match evaluate_many_attached_attempt(client, target, port, browser_id, expressions, false).await
+    {
+        Ok(values) => Ok(SessionEvaluation {
+            values,
+            mode: RendererSessionMode::UninitializedFallback,
+        }),
+        Err(fallback_error) => Err(AppError::Runtime(format!(
+            "浏览器初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{fallback_error}"
+        ))),
+    }
+}
+
+async fn evaluate_many_attached_attempt(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+    expressions: &[&str],
+    initialize: bool,
 ) -> AppResult<Vec<Value>> {
     let mut browser = CdpSession::connect_browser(client, port, browser_id).await?;
     let attached = browser
@@ -692,9 +790,11 @@ async fn evaluate_many_attached(
         .ok_or_else(|| AppError::Runtime("CDP 浏览器附加会话身份无效".into()))?
         .to_string();
     let result = async {
-        browser
-            .initialize_renderer(Some(session_id.as_str()))
-            .await?;
+        if initialize {
+            browser
+                .initialize_renderer(Some(session_id.as_str()))
+                .await?;
+        }
         let probe = browser
             .evaluate(
                 Some(session_id.as_str()),
@@ -949,6 +1049,15 @@ mod tests {
         assert_eq!(RENDERER_SESSION_DOMAINS, ["Runtime.enable", "Page.enable"]);
         assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(10));
         assert_eq!(RENDERER_PROBE_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn renderer_session_modes_distinguish_compatibility_fallbacks() {
+        assert_eq!(RendererSessionMode::Initialized.as_str(), "initialized");
+        assert_eq!(
+            RendererSessionMode::UninitializedFallback.as_str(),
+            "uninitializedFallback"
+        );
     }
 
     #[test]
