@@ -12,9 +12,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-const DIRECT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
-const BROWSER_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const RENDERER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
 const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
@@ -103,6 +102,8 @@ struct VersionResponse {
 }
 
 type PageSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+const RENDERER_SESSION_DOMAINS: [&str; 2] = ["Runtime.enable", "Page.enable"];
 
 struct CdpSession {
     endpoint: String,
@@ -209,6 +210,17 @@ impl CdpSession {
             .pointer("/result/value")
             .cloned()
             .unwrap_or(Value::Null))
+    }
+
+    async fn initialize_renderer(&mut self, session_id: Option<&str>) -> AppResult<()> {
+        for method in RENDERER_SESSION_DOMAINS {
+            self.command(session_id, method, json!({}), COMMAND_TIMEOUT)
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!("CDP 渲染会话初始化失败（{method}）：{error}"))
+                })?;
+        }
+        Ok(())
     }
 
     async fn command(
@@ -640,8 +652,9 @@ async fn evaluate_many_direct(
     expressions: &[&str],
 ) -> AppResult<Vec<Value>> {
     let mut session = CdpSession::connect_page(target, port).await?;
+    session.initialize_renderer(None).await?;
     let probe = session
-        .evaluate(None, PROBE_EXPRESSION, DIRECT_PROBE_TIMEOUT)
+        .evaluate(None, PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT)
         .await?;
     if !probe_is_codex(Some(&probe)) {
         return Err(AppError::Runtime(
@@ -679,11 +692,14 @@ async fn evaluate_many_attached(
         .ok_or_else(|| AppError::Runtime("CDP 浏览器附加会话身份无效".into()))?
         .to_string();
     let result = async {
+        browser
+            .initialize_renderer(Some(session_id.as_str()))
+            .await?;
         let probe = browser
             .evaluate(
                 Some(session_id.as_str()),
                 PROBE_EXPRESSION,
-                BROWSER_PROBE_TIMEOUT,
+                RENDERER_PROBE_TIMEOUT,
             )
             .await?;
         if !probe_is_codex(Some(&probe)) {
@@ -926,6 +942,16 @@ mod tests {
 
         let browser_request = command_request(8, None, "Browser.getVersion", json!({}));
         assert!(browser_request.get("sessionId").is_none());
+    }
+
+    #[test]
+    fn renderer_sessions_initialize_the_domains_used_by_the_upstream_injector() {
+        assert_eq!(
+            RENDERER_SESSION_DOMAINS,
+            ["Runtime.enable", "Page.enable"]
+        );
+        assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(RENDERER_PROBE_TIMEOUT, Duration::from_secs(10));
     }
 
     #[test]
