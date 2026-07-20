@@ -12,8 +12,11 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const DIRECT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+const BROWSER_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
-const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
 const DIAGNOSTIC_PROBE_LIMIT: usize = 4;
 
@@ -102,14 +105,69 @@ struct VersionResponse {
 type PageSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct CdpSession {
-    target_id: String,
+    endpoint: String,
     stream: PageSocket,
     next_id: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpTransport {
+    DirectPage,
+    BrowserSession,
+}
+
+impl CdpTransport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectPage => "directPage",
+            Self::BrowserSession => "browserSession",
+        }
+    }
+}
+
+struct CdpEvaluation {
+    values: Vec<Value>,
+    transport: CdpTransport,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CdpApplyOutcome {
+    pub applied_targets: usize,
+    pub direct_targets: usize,
+    pub browser_session_targets: usize,
+}
+
 impl CdpSession {
-    async fn connect(target: &CdpTarget, port: u16) -> AppResult<Self> {
+    async fn connect_page(target: &CdpTarget, port: u16) -> AppResult<Self> {
         let url = validated_page_url(target, port)?;
+        Self::connect_url(url, format!("page/{}", target.id)).await
+    }
+
+    async fn connect_browser(
+        client: &Client,
+        port: u16,
+        expected_browser_id: &str,
+    ) -> AppResult<Self> {
+        let version: VersionResponse = fetch_json(client, port, "/json/version").await?;
+        let url = validated_debugger_url(&version.web_socket_debugger_url, port, "browser")?;
+        let browser_id = url
+            .path()
+            .strip_prefix("/devtools/browser/")
+            .filter(|value| valid_identifier(value))
+            .ok_or_else(|| AppError::Runtime("CDP 浏览器身份路径无效".into()))?;
+        if browser_id != expected_browser_id {
+            return Err(AppError::Runtime(format!(
+                "CDP 浏览器身份已改变：{expected_browser_id} -> {browser_id}"
+            )));
+        }
+        let mut session = Self::connect_url(url, format!("browser/{browser_id}")).await?;
+        session
+            .command(None, "Browser.getVersion", json!({}), COMMAND_TIMEOUT)
+            .await?;
+        Ok(session)
+    }
+
+    async fn connect_url(url: Url, endpoint: String) -> AppResult<Self> {
         let (stream, _) = timeout(
             CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async(url.as_str()),
@@ -117,21 +175,22 @@ impl CdpSession {
         .await
         .map_err(|_| AppError::Runtime("CDP WebSocket 连接超时".into()))?
         .map_err(|error| AppError::Runtime(format!("CDP WebSocket 连接失败：{error}")))?;
-        let session = Self {
-            target_id: target.id.clone(),
+        Ok(Self {
+            endpoint,
             stream,
             next_id: 1,
-        };
-        // Runtime.enable and Page.enable only subscribe to domain events. Theme
-        // injection evaluates in the target's default context and does not consume
-        // those event streams. Some Codex renderer builds can stall while replaying
-        // existing Runtime contexts, so keep the session command-driven instead.
-        Ok(session)
+        })
     }
 
-    async fn evaluate(&mut self, expression: &str) -> AppResult<Value> {
+    async fn evaluate(
+        &mut self,
+        session_id: Option<&str>,
+        expression: &str,
+        wait: Duration,
+    ) -> AppResult<Value> {
         let result = self
             .command(
+                session_id,
                 "Runtime.evaluate",
                 json!({
                     "expression": expression,
@@ -139,7 +198,7 @@ impl CdpSession {
                     "returnByValue": true,
                     "userGesture": false,
                 }),
-                EVALUATE_TIMEOUT,
+                wait,
             )
             .await?;
         if let Some(exception) = result.get("exceptionDetails") {
@@ -151,10 +210,16 @@ impl CdpSession {
             .unwrap_or(Value::Null))
     }
 
-    async fn command(&mut self, method: &str, params: Value, wait: Duration) -> AppResult<Value> {
+    async fn command(
+        &mut self,
+        session_id: Option<&str>,
+        method: &str,
+        params: Value,
+        wait: Duration,
+    ) -> AppResult<Value> {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let request = json!({ "id": id, "method": method, "params": params }).to_string();
+        let request = command_request(id, session_id, method, params).to_string();
         let request_bytes = request.len();
         let deadline = Instant::now() + wait;
         timeout_at(deadline, self.stream.send(Message::Text(request.into())))
@@ -162,7 +227,7 @@ impl CdpSession {
             .map_err(|_| {
                 AppError::Runtime(format!(
                     "CDP 命令发送超时：{method}，目标 {}，载荷 {request_bytes} bytes",
-                    self.target_id
+                    self.endpoint
                 ))
             })?
             .map_err(|error| AppError::Runtime(format!("发送 CDP 命令失败：{error}")))?;
@@ -177,7 +242,7 @@ impl CdpSession {
                     let last_event = last_event_method.as_deref().unwrap_or("none");
                     AppError::Runtime(format!(
                         "CDP 命令等待超时：{method}，目标 {}，载荷 {request_bytes} bytes，已接收 {received_frames} 帧（事件 {event_frames}），最近事件 {last_event}",
-                        self.target_id,
+                        self.endpoint,
                     ))
                 })?;
             let message = next
@@ -192,7 +257,13 @@ impl CdpSession {
                 _ => continue,
             };
             let parsed: Value = serde_json::from_str(text.as_str())?;
-            if parsed.get("id").and_then(Value::as_u64) == Some(id) {
+            let matching_session = match session_id {
+                Some(expected) => {
+                    parsed.get("sessionId").and_then(Value::as_str) == Some(expected)
+                }
+                None => true,
+            };
+            if parsed.get("id").and_then(Value::as_u64) == Some(id) && matching_session {
                 break parsed;
             }
             if let Some(event) = parsed.get("method").and_then(Value::as_str) {
@@ -214,6 +285,14 @@ impl CdpSession {
     async fn close(mut self) {
         let _ = self.stream.close(None).await;
     }
+}
+
+fn command_request(id: u64, session_id: Option<&str>, method: &str, params: Value) -> Value {
+    let mut request = json!({ "id": id, "method": method, "params": params });
+    if let Some(session_id) = session_id {
+        request["sessionId"] = Value::String(session_id.into());
+    }
+    request
 }
 
 pub fn build_client() -> AppResult<Client> {
@@ -250,10 +329,15 @@ pub async fn verified_targets(
         )));
     }
     let targets: Vec<CdpTarget> = fetch_json(client, port, "/json/list").await?;
-    Ok(targets
+    let mut targets: Vec<CdpTarget> = targets
         .into_iter()
         .filter(|target| valid_page_target(target, port))
-        .collect())
+        .collect();
+    // The upstream injector probes every app:// page. Prefer the primary page,
+    // but retain initialRoute windows as fallback candidates because current
+    // Codex builds can expose the responsive renderer under either target.
+    targets.sort_by_key(target_priority);
+    Ok(targets)
 }
 
 /// Collects a bounded, content-free renderer fingerprint for persistent failure logs.
@@ -328,12 +412,24 @@ async fn collect_diagnostic_snapshot(
             probed_targets += 1;
             match timeout(
                 DIAGNOSTIC_PROBE_TIMEOUT,
-                evaluate_many(&target, port, &[PROBE_EXPRESSION]),
+                evaluate_many(
+                    client,
+                    &target,
+                    port,
+                    identity.id.as_str(),
+                    &[PROBE_EXPRESSION],
+                ),
             )
             .await
             {
-                Ok(Ok(values)) => {
-                    report["probe"] = values.into_iter().next().unwrap_or(Value::Null)
+                Ok(Ok(evaluation)) => {
+                    report["probe"] = evaluation
+                        .values
+                        .into_iter()
+                        .next()
+                        .unwrap_or(Value::Null);
+                    report["probeTransport"] =
+                        Value::String(evaluation.transport.as_str().into());
                 }
                 Ok(Err(error)) => report["probeError"] = Value::String(error.to_string()),
                 Err(_) => {
@@ -369,19 +465,34 @@ pub async fn apply_to_verified_targets(
     port: u16,
     browser_id: &str,
     payload: &str,
-) -> AppResult<usize> {
+) -> AppResult<CdpApplyOutcome> {
     let targets = verified_targets(client, port, browser_id).await?;
     let mut applied = 0;
+    let mut direct_targets = 0;
+    let mut browser_session_targets = 0;
     let mut last_error = None;
     let guarded_payload = guarded_expression(payload);
     for target in targets {
-        match evaluate_many(&target, port, &[&guarded_payload]).await {
-            Ok(values)
-                if probe_is_codex(values.first()) && theme_install_is_confirmed(values.first()) =>
+        match evaluate_many(
+            client,
+            &target,
+            port,
+            browser_id,
+            &[&guarded_payload],
+        )
+        .await
+        {
+            Ok(evaluation)
+                if probe_is_codex(evaluation.values.first())
+                    && theme_install_is_confirmed(evaluation.values.first()) =>
             {
-                applied += 1
+                applied += 1;
+                match evaluation.transport {
+                    CdpTransport::DirectPage => direct_targets += 1,
+                    CdpTransport::BrowserSession => browser_session_targets += 1,
+                }
             }
-            Ok(values) if probe_is_codex(values.first()) => {
+            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
                 last_error = Some("主题样式未完成挂载".to_string())
             }
             Ok(_) => last_error = Some("页面尚未达到安全可注入状态".to_string()),
@@ -394,7 +505,11 @@ pub async fn apply_to_verified_targets(
             last_error.unwrap_or_else(|| "目标列表为空".into())
         )));
     }
-    Ok(applied)
+    Ok(CdpApplyOutcome {
+        applied_targets: applied,
+        direct_targets,
+        browser_session_targets,
+    })
 }
 
 pub async fn ensure_theme_on_verified_targets(
@@ -410,14 +525,15 @@ pub async fn ensure_theme_on_verified_targets(
     let mut healthy = 0;
     let mut last_error = None;
     for target in targets {
-        match evaluate_many(&target, port, &[&health]).await {
-            Ok(values)
-                if probe_is_codex(values.first()) && action_result_is_true(values.first()) =>
+        match evaluate_many(client, &target, port, browser_id, &[&health]).await {
+            Ok(evaluation)
+                if probe_is_codex(evaluation.values.first())
+                    && action_result_is_true(evaluation.values.first()) =>
             {
                 healthy += 1;
                 continue;
             }
-            Ok(values) if probe_is_codex(values.first()) => {}
+            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {}
             Ok(_) => {
                 last_error = Some("页面尚未达到安全可注入状态".to_string());
                 continue;
@@ -429,13 +545,22 @@ pub async fn ensure_theme_on_verified_targets(
         }
 
         let guarded_payload = guarded_payload.get_or_insert_with(|| guarded_expression(payload));
-        match evaluate_many(&target, port, &[guarded_payload.as_str()]).await {
-            Ok(values)
-                if probe_is_codex(values.first()) && theme_install_is_confirmed(values.first()) =>
+        match evaluate_many(
+            client,
+            &target,
+            port,
+            browser_id,
+            &[guarded_payload.as_str()],
+        )
+        .await
+        {
+            Ok(evaluation)
+                if probe_is_codex(evaluation.values.first())
+                    && theme_install_is_confirmed(evaluation.values.first()) =>
             {
                 healthy += 1
             }
-            Ok(values) if probe_is_codex(values.first()) => {
+            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
                 last_error = Some("重注入后主题样式未完成挂载".to_string())
             }
             Ok(_) => last_error = Some("页面在重注入前尚未达到安全可注入状态".to_string()),
@@ -456,8 +581,9 @@ pub async fn count_codex_targets(client: &Client, port: u16, browser_id: &str) -
     let guarded_probe = guarded_expression("true");
     let mut verified = 0;
     for target in targets {
-        let values = evaluate_many(&target, port, &[&guarded_probe]).await?;
-        if probe_is_codex(values.first()) {
+        let evaluation =
+            evaluate_many(client, &target, port, browser_id, &[&guarded_probe]).await?;
+        if probe_is_codex(evaluation.values.first()) {
             verified += 1;
         }
     }
@@ -473,8 +599,9 @@ pub async fn remove_from_verified_targets(
     let mut removed = 0;
     let guarded_remove = guarded_expression(REMOVE_EXPRESSION);
     for target in targets {
-        let values = evaluate_many(&target, port, &[&guarded_remove]).await?;
-        if probe_is_codex(values.first()) {
+        let evaluation =
+            evaluate_many(client, &target, port, browser_id, &[&guarded_remove]).await?;
+        if probe_is_codex(evaluation.values.first()) {
             removed += 1;
         }
     }
@@ -495,17 +622,114 @@ async fn fetch_json<T: DeserializeOwned>(
 }
 
 async fn evaluate_many(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+    expressions: &[&str],
+) -> AppResult<CdpEvaluation> {
+    let direct_error = match evaluate_many_direct(target, port, expressions).await {
+        Ok(values) => {
+            return Ok(CdpEvaluation {
+                values,
+                transport: CdpTransport::DirectPage,
+            })
+        }
+        Err(error) => error,
+    };
+    match evaluate_many_attached(client, target, port, browser_id, expressions).await {
+        Ok(values) => Ok(CdpEvaluation {
+            values,
+            transport: CdpTransport::BrowserSession,
+        }),
+        Err(browser_error) => Err(AppError::Runtime(format!(
+            "CDP 页面直连与浏览器会话均失败；页面直连：{direct_error}；浏览器会话：{browser_error}"
+        ))),
+    }
+}
+
+async fn evaluate_many_direct(
     target: &CdpTarget,
     port: u16,
     expressions: &[&str],
 ) -> AppResult<Vec<Value>> {
-    let mut session = CdpSession::connect(target, port).await?;
+    let mut session = CdpSession::connect_page(target, port).await?;
+    let probe = session
+        .evaluate(None, PROBE_EXPRESSION, DIRECT_PROBE_TIMEOUT)
+        .await?;
+    if !probe_is_codex(Some(&probe)) {
+        return Err(AppError::Runtime(
+            "页面直连探针未确认可注入的 Codex 文档".into(),
+        ));
+    }
     let mut values = Vec::with_capacity(expressions.len());
     for expression in expressions {
-        values.push(session.evaluate(expression).await?);
+        values.push(session.evaluate(None, expression, EVALUATE_TIMEOUT).await?);
     }
     session.close().await;
     Ok(values)
+}
+
+async fn evaluate_many_attached(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+    expressions: &[&str],
+) -> AppResult<Vec<Value>> {
+    let mut browser = CdpSession::connect_browser(client, port, browser_id).await?;
+    let attached = browser
+        .command(
+            None,
+            "Target.attachToTarget",
+            json!({ "targetId": target.id.as_str(), "flatten": true }),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
+    let session_id = attached
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_identifier(value))
+        .ok_or_else(|| AppError::Runtime("CDP 浏览器附加会话身份无效".into()))?
+        .to_string();
+    let result = async {
+        let probe = browser
+            .evaluate(
+                Some(session_id.as_str()),
+                PROBE_EXPRESSION,
+                BROWSER_PROBE_TIMEOUT,
+            )
+            .await?;
+        if !probe_is_codex(Some(&probe)) {
+            return Err(AppError::Runtime(
+                "浏览器附加探针未确认可注入的 Codex 文档".into(),
+            ));
+        }
+        let mut values = Vec::with_capacity(expressions.len());
+        for expression in expressions {
+            values.push(
+                browser
+                    .evaluate(
+                        Some(session_id.as_str()),
+                        expression,
+                        EVALUATE_TIMEOUT,
+                    )
+                    .await?,
+            );
+        }
+        Ok(values)
+    }
+    .await;
+    let _ = browser
+        .command(
+            None,
+            "Target.detachFromTarget",
+            json!({ "sessionId": session_id }),
+            COMMAND_TIMEOUT,
+        )
+        .await;
+    browser.close().await;
+    result
 }
 
 fn probe_is_codex(value: Option<&Value>) -> bool {
@@ -567,15 +791,23 @@ fn valid_page_target(target: &CdpTarget, port: u16) -> bool {
     let Ok(document_url) = Url::parse(&target.url) else {
         return false;
     };
-    let has_initial_route = document_url
-        .query_pairs()
-        .any(|(key, _)| key.eq_ignore_ascii_case("initialRoute"));
     target.target_type == "page"
         && target.url.starts_with("app://")
         && document_url.scheme() == "app"
-        && !has_initial_route
         && valid_identifier(&target.id)
         && validated_page_url(target, port).is_ok()
+}
+
+fn target_priority(target: &CdpTarget) -> u8 {
+    Url::parse(&target.url)
+        .ok()
+        .map(|url| {
+            u8::from(
+                url.query_pairs()
+                    .any(|(key, _)| key.eq_ignore_ascii_case("initialRoute")),
+            )
+        })
+        .unwrap_or(1)
 }
 
 fn safe_target_location(raw: &str) -> Value {
@@ -584,6 +816,7 @@ fn safe_target_location(raw: &str) -> Value {
             "scheme": url.scheme(),
             "host": url.host_str().map(|value| value.chars().take(80).collect::<String>()),
             "path": url.path().chars().take(160).collect::<String>(),
+            "initialRoute": url.query_pairs().any(|(key, _)| key.eq_ignore_ascii_case("initialRoute")),
         }),
         Err(_) => json!({ "scheme": "invalid" }),
     }
@@ -681,16 +914,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_secondary_initial_route_targets() {
+    fn keeps_initial_route_targets_as_low_priority_fallbacks() {
         let mut item = target("ws://127.0.0.1:9341/devtools/page/page-1");
         item.url = "app://-/index.html?initialRoute=settings".into();
-        assert!(!valid_page_target(&item, 9341));
+        assert!(valid_page_target(&item, 9341));
+        assert_eq!(target_priority(&item), 1);
 
         item.url = "app://-/index.html?INITIALROUTE=settings".into();
-        assert!(!valid_page_target(&item, 9341));
+        assert!(valid_page_target(&item, 9341));
+        assert_eq!(target_priority(&item), 1);
 
         item.url = "app://-/index.html?route=settings".into();
         assert!(valid_page_target(&item, 9341));
+        assert_eq!(target_priority(&item), 0);
+    }
+
+    #[test]
+    fn flattened_commands_carry_the_attached_session_id() {
+        let request = command_request(
+            7,
+            Some("session-1"),
+            "Runtime.evaluate",
+            json!({ "expression": "true" }),
+        );
+        assert_eq!(request["id"], 7);
+        assert_eq!(request["sessionId"], "session-1");
+        assert_eq!(request["method"], "Runtime.evaluate");
+        assert_eq!(request["params"]["expression"], "true");
+
+        let browser_request = command_request(8, None, "Browser.getVersion", json!({}));
+        assert!(browser_request.get("sessionId").is_none());
     }
 
     #[test]
@@ -714,7 +967,7 @@ mod tests {
         assert!(PROBE_EXPRESSION.contains("slice(0, 24)"));
         assert!(PROBE_EXPRESSION.contains("elementCount"));
         assert!(PROBE_EXPRESSION.contains("security.appProtocol && security.documentReady"));
-        assert_eq!(DIAGNOSTIC_PROBE_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(DIAGNOSTIC_PROBE_TIMEOUT, Duration::from_secs(12));
         assert_eq!(DIAGNOSTIC_TARGET_LIMIT, 16);
         assert_eq!(DIAGNOSTIC_PROBE_LIMIT, 4);
         for forbidden in [
@@ -774,6 +1027,7 @@ mod tests {
         assert_eq!(location["scheme"], "app");
         assert_eq!(location["host"], "codex");
         assert_eq!(location["path"], "/home");
+        assert_eq!(location["initialRoute"], false);
         assert!(location.get("query").is_none());
         assert!(location.get("fragment").is_none());
     }
