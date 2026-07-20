@@ -946,10 +946,7 @@ mod tests {
 
     #[test]
     fn renderer_sessions_initialize_the_domains_used_by_the_upstream_injector() {
-        assert_eq!(
-            RENDERER_SESSION_DOMAINS,
-            ["Runtime.enable", "Page.enable"]
-        );
+        assert_eq!(RENDERER_SESSION_DOMAINS, ["Runtime.enable", "Page.enable"]);
         assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(10));
         assert_eq!(RENDERER_PROBE_TIMEOUT, Duration::from_secs(10));
     }
