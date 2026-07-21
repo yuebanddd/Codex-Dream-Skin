@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.10 — 2026-07-21
+
+- 主题引擎代码、CSS 与背景图改为独立通道：Rust 先安装小型渲染引擎，再分别传输 72 KiB 原始 CSS 与图片分片，避免任意允许大小的主题资源进入大型 `Runtime.evaluate`
+- 背景图分片在收到时立即解码为二进制块；最终安装通过渲染页异步任务依次完成 CSS SHA-256、图片 SHA-256、Blob 组装与 DOM 挂载，CDP 仅轮询小型状态对象
+- 安装阶段细分为 `queued`、`validatingCss`、`assemblingImage`、`validatingImage`、`installing`、`installed`/`failed`，每次阶段变化、分片里程碑、摘要、耗时和渲染器内计时都自动写入 `runtime.jsonl`
+- 安装任务一旦排队，若确认响应丢失、状态遗失或超时，会以类型化终止错误停止会话回退、其他目标重试、就绪循环和 watcher 重注入，防止同一渲染器上的阻塞扩散
+- 失败日志新增 `retrySuppressed`、精确阶段、目标和安全诊断快照；不记录主题 CSS、图片内容、页面文本、对话或浏览器存储
+- 版本升级至 0.5.10
+
 ## 0.5.9 — 2026-07-20
 
 - 大型主题载荷改为纯 Rust 驱动的 CDP 应用层分片传输，避免包含高分辨率背景图时单条 `Runtime.evaluate` 超过 Codex 渲染器的可靠处理范围

@@ -1,64 +1,114 @@
+use crate::renderer_payload::RendererPayload;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const INLINE_EXPRESSION_LIMIT_BYTES: usize = 192 * 1024;
-const ENCODED_CHUNK_BYTES: usize = 96 * 1024;
-const TRANSFER_KEY_PREFIX: &str = "__LUMADROBE_CDP_TRANSFER__";
+const DATA_CHUNK_BYTES: usize = 72 * 1024;
+const TRANSFER_KEY_PREFIX: &str = "__LUMADROBE_THEME_TRANSFER__";
+const ENGINE_KEY: &str = "__LUMADROBE_ENGINE__";
+const ENGINE_VERSION: u32 = 1;
 const TRANSFER_TTL_MS: u64 = 120_000;
 static TRANSFER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
-pub(crate) struct TransferPlan {
+pub(crate) struct ThemeTransferPlan {
     storage_key: String,
     token: String,
-    sha256: String,
-    original_bytes: usize,
-    encoded_bytes: usize,
-    chunks: Vec<String>,
+    theme_json: String,
+    css_sha256: String,
+    css_bytes: usize,
+    css_chunks: Vec<String>,
+    art_mime: String,
+    art_sha256: String,
+    art_bytes: usize,
+    art_chunks: Vec<String>,
 }
 
-impl TransferPlan {
-    pub(crate) fn new(expression: &str) -> Self {
-        let sha256 = format!("{:x}", Sha256::digest(expression.as_bytes()));
+impl ThemeTransferPlan {
+    pub(crate) fn new(payload: &RendererPayload) -> Self {
+        let css_sha256 = format!("{:x}", Sha256::digest(payload.css().as_bytes()));
+        let art_sha256 = format!("{:x}", Sha256::digest(payload.art()));
         let attempt_id = next_attempt_id();
-        let encoded = STANDARD.encode(expression.as_bytes());
-        let chunks = encoded
+        let css_chunks = payload
+            .css()
             .as_bytes()
-            .chunks(ENCODED_CHUNK_BYTES)
-            .map(|chunk| String::from_utf8(chunk.to_vec()).expect("base64 is ASCII"))
+            .chunks(DATA_CHUNK_BYTES)
+            .map(|chunk| STANDARD.encode(chunk))
+            .collect::<Vec<_>>();
+        let art_chunks = payload
+            .art()
+            .chunks(DATA_CHUNK_BYTES)
+            .map(|chunk| STANDARD.encode(chunk))
             .collect::<Vec<_>>();
         Self {
             storage_key: format!("{TRANSFER_KEY_PREFIX}:{attempt_id}"),
-            token: format!("{}-{}-{attempt_id}", &sha256[..20], expression.len()),
-            sha256,
-            original_bytes: expression.len(),
-            encoded_bytes: encoded.len(),
-            chunks,
+            token: format!(
+                "{}-{}-{attempt_id}",
+                &art_sha256[..20],
+                payload.data_bytes()
+            ),
+            theme_json: payload.theme_json().to_string(),
+            css_sha256,
+            css_bytes: payload.css().len(),
+            css_chunks,
+            art_mime: payload.art_mime().to_string(),
+            art_sha256,
+            art_bytes: payload.art().len(),
+            art_chunks,
         }
     }
 
-    pub(crate) fn sha256(&self) -> &str {
-        &self.sha256
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 
-    pub(crate) fn original_bytes(&self) -> usize {
-        self.original_bytes
+    pub(crate) fn css_sha256(&self) -> &str {
+        &self.css_sha256
     }
 
-    pub(crate) fn chunk_count(&self) -> usize {
-        self.chunks.len()
+    pub(crate) fn css_bytes(&self) -> usize {
+        self.css_bytes
+    }
+
+    pub(crate) fn art_sha256(&self) -> &str {
+        &self.art_sha256
+    }
+
+    pub(crate) fn art_bytes(&self) -> usize {
+        self.art_bytes
+    }
+
+    pub(crate) fn css_chunk_count(&self) -> usize {
+        self.css_chunks.len()
+    }
+
+    pub(crate) fn art_chunk_count(&self) -> usize {
+        self.art_chunks.len()
+    }
+
+    pub(crate) fn css_received_bytes_after(&self, index: usize) -> usize {
+        self.css_bytes
+            .min((index + 1).saturating_mul(DATA_CHUNK_BYTES))
+    }
+
+    pub(crate) fn art_received_bytes_after(&self, index: usize) -> usize {
+        self.art_bytes
+            .min((index + 1).saturating_mul(DATA_CHUNK_BYTES))
     }
 
     pub(crate) fn initialize_expression(&self) -> String {
         let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
-        let sha256 = json_string(&self.sha256);
-        let original_bytes = self.original_bytes;
-        let encoded_bytes = self.encoded_bytes;
-        let chunk_count = self.chunks.len();
+        let css_sha256 = json_string(&self.css_sha256);
+        let art_mime = json_string(&self.art_mime);
+        let art_sha256 = json_string(&self.art_sha256);
+        let theme = &self.theme_json;
+        let css_bytes = self.css_bytes;
+        let art_bytes = self.art_bytes;
+        let css_chunk_count = self.css_chunks.len();
+        let art_chunk_count = self.art_chunks.len();
         let ttl_ms = TRANSFER_TTL_MS;
         format!(
             r#"(() => {{
@@ -71,22 +121,35 @@ impl TransferPlan {
   }}, {ttl_ms});
   globalThis[key] = {{
     token,
-    sha256: {sha256},
-    originalBytes: {original_bytes},
-    encodedBytes: {encoded_bytes},
-    chunkCount: {chunk_count},
-    chunks: [],
+    phase: "initialized",
+    theme: {theme},
+    cssText: null,
+    cssBytes: {css_bytes},
+    cssSha256: {css_sha256},
+    cssChunkCount: {css_chunk_count},
+    cssReceivedBytes: 0,
+    cssParts: [],
+    artMime: {art_mime},
+    artBytes: {art_bytes},
+    artSha256: {art_sha256},
+    artChunkCount: {art_chunk_count},
+    artReceivedBytes: 0,
+    artParts: [],
+    result: null,
+    error: null,
+    failedPhase: null,
+    timings: {{}},
     cleanupTimer,
   }};
-  return {{ accepted: true, token, receivedChunks: 0 }};
+  return {{ accepted: true, token, phase: "initialized", receivedChunks: 0, receivedBytes: 0 }};
 }})()"#
         )
     }
 
-    pub(crate) fn append_expression(&self, index: usize) -> String {
+    pub(crate) fn css_chunk_expression(&self, index: usize) -> String {
         let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
-        let chunk = json_string(&self.chunks[index]);
+        let chunk = json_string(&self.css_chunks[index]);
         let ttl_ms = TRANSFER_TTL_MS;
         format!(
             r#"(() => {{
@@ -94,43 +157,174 @@ impl TransferPlan {
   const token = {token};
   const transfer = globalThis[key];
   if (!transfer || transfer.token !== token) throw new Error("LumaDrobe transfer token mismatch");
-  if (transfer.chunks.length !== {index}) throw new Error("LumaDrobe transfer chunk order mismatch");
-  transfer.chunks.push({chunk});
+  if (transfer.phase !== "initialized" && transfer.phase !== "cssReceiving") {{
+    throw new Error("LumaDrobe CSS transfer phase mismatch");
+  }}
+  if (transfer.cssParts.length !== {index}) throw new Error("LumaDrobe CSS chunk order mismatch");
+  const binary = atob({chunk});
+  const bytes = new Uint8Array(binary.length);
+  for (let offset = 0; offset < binary.length; offset += 1) {{
+    bytes[offset] = binary.charCodeAt(offset);
+  }}
+  transfer.cssParts.push(bytes);
+  transfer.cssReceivedBytes += bytes.byteLength;
+  if (transfer.cssReceivedBytes > transfer.cssBytes) throw new Error("LumaDrobe CSS payload overflow");
+  transfer.phase = "cssReceiving";
   if (transfer.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
   transfer.cleanupTimer = globalThis.setTimeout(() => {{
     if (globalThis[key]?.token === token) delete globalThis[key];
   }}, {ttl_ms});
-  return {{ accepted: true, token: transfer.token, receivedChunks: transfer.chunks.length }};
+  return {{
+    accepted: true,
+    token,
+    phase: transfer.phase,
+    receivedChunks: transfer.cssParts.length,
+    receivedBytes: transfer.cssReceivedBytes,
+  }};
 }})()"#
         )
     }
 
-    pub(crate) fn commit_expression(&self) -> String {
+    pub(crate) fn art_chunk_expression(&self, index: usize) -> String {
         let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
+        let chunk = json_string(&self.art_chunks[index]);
+        let ttl_ms = TRANSFER_TTL_MS;
         format!(
-            r#"(async () => {{
+            r#"(() => {{
   const key = {key};
   const token = {token};
   const transfer = globalThis[key];
-  try {{
-    if (!transfer || transfer.token !== token) throw new Error("LumaDrobe transfer token mismatch");
-    if (transfer.chunks.length !== transfer.chunkCount) throw new Error("LumaDrobe transfer is incomplete");
-    const encoded = transfer.chunks.join("");
-    if (encoded.length !== transfer.encodedBytes) throw new Error("LumaDrobe transfer encoded length mismatch");
-    const binary = atob(encoded);
-    const bytes = Uint8Array.from(binary, (value) => value.charCodeAt(0));
-    if (bytes.byteLength !== transfer.originalBytes) throw new Error("LumaDrobe transfer byte length mismatch");
-    if (!globalThis.crypto?.subtle) throw new Error("LumaDrobe transfer SHA-256 is unavailable");
-    const digestBytes = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes));
-    const digest = Array.from(digestBytes, (value) => value.toString(16).padStart(2, "0")).join("");
-    if (digest !== transfer.sha256) throw new Error("LumaDrobe transfer SHA-256 mismatch");
-    const source = new TextDecoder("utf-8", {{ fatal: true }}).decode(bytes);
-    return (0, eval)(source);
-  }} finally {{
-    if (transfer?.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
-    if (globalThis[key]?.token === token) delete globalThis[key];
+  if (!transfer || transfer.token !== token) throw new Error("LumaDrobe transfer token mismatch");
+  if (transfer.phase !== "cssReceiving" && transfer.phase !== "artReceiving") {{
+    throw new Error("LumaDrobe art transfer phase mismatch");
   }}
+  if (transfer.cssParts.length !== transfer.cssChunkCount ||
+      transfer.cssReceivedBytes !== transfer.cssBytes) {{
+    throw new Error("LumaDrobe CSS transfer is incomplete");
+  }}
+  if (transfer.artParts.length !== {index}) throw new Error("LumaDrobe art chunk order mismatch");
+  const binary = atob({chunk});
+  const bytes = new Uint8Array(binary.length);
+  for (let offset = 0; offset < binary.length; offset += 1) {{
+    bytes[offset] = binary.charCodeAt(offset);
+  }}
+  transfer.artParts.push(bytes);
+  transfer.artReceivedBytes += bytes.byteLength;
+  if (transfer.artReceivedBytes > transfer.artBytes) throw new Error("LumaDrobe art payload overflow");
+  transfer.phase = "artReceiving";
+  if (transfer.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
+  transfer.cleanupTimer = globalThis.setTimeout(() => {{
+    if (globalThis[key]?.token === token) delete globalThis[key];
+  }}, {ttl_ms});
+  return {{
+    accepted: true,
+    token,
+    phase: transfer.phase,
+    receivedChunks: transfer.artParts.length,
+    receivedBytes: transfer.artReceivedBytes,
+  }};
+}})()"#
+        )
+    }
+
+    pub(crate) fn start_expression(&self) -> String {
+        let key = json_string(&self.storage_key);
+        let token = json_string(&self.token);
+        let engine_key = json_string(ENGINE_KEY);
+        let engine_version = ENGINE_VERSION;
+        let ttl_ms = TRANSFER_TTL_MS;
+        format!(
+            r#"(() => {{
+  const key = {key};
+  const token = {token};
+  const transfer = globalThis[key];
+  if (!transfer || transfer.token !== token) throw new Error("LumaDrobe transfer token mismatch");
+  if (transfer.phase !== "artReceiving" ||
+      transfer.cssParts.length !== transfer.cssChunkCount ||
+      transfer.cssReceivedBytes !== transfer.cssBytes ||
+      transfer.artParts.length !== transfer.artChunkCount ||
+      transfer.artReceivedBytes !== transfer.artBytes ||
+      transfer.cssText !== null) {{
+    throw new Error("LumaDrobe staged theme is incomplete");
+  }}
+  const engine = globalThis[{engine_key}];
+  if (engine?.engineVersion !== {engine_version} || typeof engine?.install !== "function") {{
+    throw new Error("LumaDrobe renderer engine is unavailable");
+  }}
+  if (transfer.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
+  transfer.cleanupTimer = globalThis.setTimeout(() => {{
+    if (globalThis[key]?.token === token) delete globalThis[key];
+  }}, {ttl_ms});
+  transfer.phase = "queued";
+  transfer.startedAt = performance.now();
+  globalThis.setTimeout(() => {{
+    void (async () => {{
+      const current = globalThis[key];
+      if (!current || current.token !== token || current.phase !== "queued") return;
+      const mark = (phase) => {{
+        current.phase = phase;
+        current.timings[phase] = Number((performance.now() - current.startedAt).toFixed(3));
+      }};
+      const digest = async (bytes) => {{
+        const value = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+        return Array.from(value, (item) => item.toString(16).padStart(2, "0")).join("");
+      }};
+      try {{
+        if (!globalThis.crypto?.subtle) throw new Error("LumaDrobe SHA-256 is unavailable");
+        mark("validatingCss");
+        const cssBlob = new Blob(current.cssParts);
+        if (cssBlob.size !== current.cssBytes) throw new Error("LumaDrobe CSS Blob size mismatch");
+        const cssBuffer = await cssBlob.arrayBuffer();
+        if (await digest(cssBuffer) !== current.cssSha256) {{
+          throw new Error("LumaDrobe CSS SHA-256 mismatch");
+        }}
+        current.cssText = new TextDecoder("utf-8", {{ fatal: true }}).decode(cssBuffer);
+        current.cssParts = [];
+        mark("assemblingImage");
+        const artBlob = new Blob(current.artParts, {{ type: current.artMime }});
+        if (artBlob.size !== current.artBytes) throw new Error("LumaDrobe art Blob size mismatch");
+        current.artParts = [];
+        mark("validatingImage");
+        const artBuffer = await artBlob.arrayBuffer();
+        if (await digest(artBuffer) !== current.artSha256) {{
+          throw new Error("LumaDrobe art SHA-256 mismatch");
+        }}
+        mark("installing");
+        current.result = engine.install(current.theme, current.cssText, artBlob);
+        mark("installed");
+      }} catch (error) {{
+        current.failedPhase = current.phase;
+        current.error = String(error?.message || error || "unknown renderer failure").slice(0, 500);
+        mark("failed");
+      }}
+    }})();
+  }}, 0);
+  return {{ accepted: true, token, phase: transfer.phase }};
+}})()"#
+        )
+    }
+
+    pub(crate) fn status_expression(&self) -> String {
+        let key = json_string(&self.storage_key);
+        let token = json_string(&self.token);
+        format!(
+            r#"(() => {{
+  const transfer = globalThis[{key}];
+  if (!transfer || transfer.token !== {token}) {{
+    return {{ accepted: false, phase: "missing" }};
+  }}
+  return {{
+    accepted: true,
+    token: transfer.token,
+    phase: transfer.phase,
+    receivedChunks: transfer.artParts.length,
+    receivedBytes: transfer.artReceivedBytes,
+    result: transfer.phase === "installed" ? transfer.result : null,
+    error: transfer.phase === "failed" ? transfer.error : null,
+    failedPhase: transfer.phase === "failed" ? transfer.failedPhase : null,
+    timings: transfer.timings,
+  }};
 }})()"#
         )
     }
@@ -144,6 +338,9 @@ impl TransferPlan {
   const transfer = globalThis[key];
   if (transfer?.token === {token}) {{
     if (transfer.cleanupTimer !== undefined) globalThis.clearTimeout(transfer.cleanupTimer);
+    transfer.artParts = [];
+    transfer.cssParts = [];
+    transfer.cssText = null;
     delete globalThis[key];
   }}
   return true;
@@ -161,10 +358,6 @@ fn next_attempt_id() -> String {
     format!("{:x}-{timestamp:x}-{sequence:x}", std::process::id())
 }
 
-pub(crate) fn requires_chunking(expression: &str) -> bool {
-    expression.len() > INLINE_EXPRESSION_LIMIT_BYTES
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serialization cannot fail")
 }
@@ -172,76 +365,86 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer_payload::RendererPayload;
 
-    #[test]
-    fn small_expressions_remain_inline() {
-        assert!(!requires_chunking("true"));
-        assert!(!requires_chunking(
-            &"a".repeat(INLINE_EXPRESSION_LIMIT_BYTES)
-        ));
-        assert!(requires_chunking(
-            &"a".repeat(INLINE_EXPRESSION_LIMIT_BYTES + 1)
-        ));
+    fn payload(art_bytes: usize) -> RendererPayload {
+        RendererPayload::test_fixture(
+            "source:night@1.0.0",
+            "body { color: white; }",
+            "image/png",
+            vec![7_u8; art_bytes],
+        )
     }
 
     #[test]
-    fn chunk_plan_round_trips_utf8_and_bounds_each_message() {
-        let expression = format!(
-            "(() => {{ const message = {:?}; return message.length; }})()",
-            "皮肤分片验证\\\"".repeat(40_000)
-        );
-        let plan = TransferPlan::new(&expression);
-        assert!(plan.chunk_count() > 1);
+    fn art_is_encoded_in_bounded_independent_chunks() {
+        let plan = ThemeTransferPlan::new(&payload(DATA_CHUNK_BYTES * 2 + 17));
+        assert_eq!(plan.art_chunk_count(), 3);
         assert!(plan
-            .chunks
+            .art_chunks
             .iter()
-            .all(|chunk| chunk.len() <= ENCODED_CHUNK_BYTES));
-        let encoded = plan.chunks.concat();
-        assert_eq!(STANDARD.decode(encoded).unwrap(), expression.as_bytes());
-        assert_eq!(plan.original_bytes(), expression.len());
-        assert_eq!(plan.sha256(), format!("{:x}", Sha256::digest(expression)));
+            .all(|chunk| { chunk.len() <= DATA_CHUNK_BYTES.div_ceil(3) * 4 }));
+        let decoded = plan
+            .art_chunks
+            .iter()
+            .flat_map(|chunk| STANDARD.decode(chunk).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, vec![7_u8; DATA_CHUNK_BYTES * 2 + 17]);
     }
 
     #[test]
-    fn generated_protocol_checks_order_digest_and_cleanup() {
-        let plan = TransferPlan::new(&"payload".repeat(40_000));
+    fn css_is_encoded_in_bounded_utf8_safe_chunks() {
+        let css = "皮肤{color:white}".repeat(12_000);
+        let payload =
+            RendererPayload::test_fixture("source:night@1.0.0", &css, "image/png", vec![7_u8; 16]);
+        let plan = ThemeTransferPlan::new(&payload);
+        assert!(plan.css_chunk_count() > 1);
+        assert!(plan
+            .css_chunks
+            .iter()
+            .all(|chunk| chunk.len() <= DATA_CHUNK_BYTES.div_ceil(3) * 4));
+        let decoded = plan
+            .css_chunks
+            .iter()
+            .flat_map(|chunk| STANDARD.decode(chunk).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, css.as_bytes());
+    }
+
+    #[test]
+    fn generated_protocol_separates_code_data_and_installation() {
+        let plan = ThemeTransferPlan::new(&payload(DATA_CHUNK_BYTES + 1));
         let initialize = plan.initialize_expression();
-        let append = plan.append_expression(0);
-        let commit = plan.commit_expression();
+        let css = plan.css_chunk_expression(0);
+        let chunk = plan.art_chunk_expression(0);
+        let start = plan.start_expression();
+        let status = plan.status_expression();
         let cleanup = plan.cleanup_expression();
 
         assert!(initialize.contains(TRANSFER_KEY_PREFIX));
-        assert!(initialize.contains(plan.sha256()));
-        assert!(append.contains("chunk order mismatch"));
-        assert!(append.contains("clearTimeout(transfer.cleanupTimer)"));
-        assert!(append.contains(&format!("}}, {TRANSFER_TTL_MS});")));
-        assert!(commit.contains("crypto.subtle.digest(\"SHA-256\", bytes)"));
-        assert!(commit.contains("TextDecoder(\"utf-8\", { fatal: true })"));
-        assert!(commit.contains("delete globalThis[key]"));
-        assert!(commit.contains("clearTimeout(transfer.cleanupTimer)"));
+        assert!(initialize.contains(plan.art_sha256()));
+        assert!(css.contains("CSS chunk order mismatch"));
+        assert!(css.len() < 192 * 1024);
+        assert!(chunk.contains("art chunk order mismatch"));
+        assert!(chunk.len() < 192 * 1024);
+        assert!(start.contains("globalThis.setTimeout"));
+        assert!(start.contains("validatingCss"));
+        assert!(start.contains("TextDecoder(\"utf-8\", { fatal: true })"));
+        assert!(start.contains("validatingImage"));
+        assert!(start.contains("engine.install"));
+        assert!(status.contains("transfer.phase"));
+        assert!(start.len() < 32 * 1024);
+        assert!(status.len() < 8 * 1024);
         assert!(cleanup.contains("delete globalThis[key]"));
-        assert!(cleanup.contains("clearTimeout(transfer.cleanupTimer)"));
-        assert!(initialize.contains(&format!("}}, {TRANSFER_TTL_MS});")));
+        assert!(!start.contains("eval("));
     }
 
     #[test]
-    fn retries_use_independent_storage_keys_and_tokens() {
-        let first = TransferPlan::new("same payload");
-        let second = TransferPlan::new("same payload");
-
+    fn attempts_use_independent_storage_keys_and_tokens() {
+        let payload = payload(16);
+        let first = ThemeTransferPlan::new(&payload);
+        let second = ThemeTransferPlan::new(&payload);
         assert_ne!(first.storage_key, second.storage_key);
         assert_ne!(first.token, second.token);
-        assert!(!first
-            .append_expression(0)
-            .contains(second.storage_key.as_str()));
-        assert!(!first.cleanup_expression().contains(second.token.as_str()));
-    }
-
-    #[test]
-    fn append_commands_stay_below_the_inline_limit() {
-        let plan = TransferPlan::new(&"\\\"\\\\\n".repeat(100_000));
-        for index in 0..plan.chunk_count() {
-            assert!(plan.append_expression(index).len() < INLINE_EXPRESSION_LIMIT_BYTES);
-        }
     }
 }
