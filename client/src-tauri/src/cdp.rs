@@ -1,5 +1,6 @@
-use crate::cdp_transfer::{requires_chunking, TransferPlan};
+use crate::cdp_transfer::ThemeTransferPlan;
 use crate::error::{AppError, AppResult};
+use crate::renderer_payload::RendererPayload;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -7,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::{sleep, timeout, timeout_at, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
@@ -18,6 +19,10 @@ const RENDERER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const INSTALL_START_TIMEOUT: Duration = Duration::from_secs(5);
+const INSTALL_POLL_TIMEOUT: Duration = Duration::from_secs(3);
+const INSTALL_DEADLINE: Duration = Duration::from_secs(25);
+const INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(125);
 const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
 const DIAGNOSTIC_PROBE_LIMIT: usize = 4;
@@ -148,34 +153,68 @@ struct CdpEvaluation {
     values: Vec<Value>,
     transport: CdpTransport,
     session_mode: RendererSessionMode,
-    transfer: TransferStats,
 }
 
 struct SessionEvaluation {
     values: Vec<Value>,
     mode: RendererSessionMode,
-    transfer: TransferStats,
 }
 
-struct EvaluatedValue {
+struct ThemeInstallation {
     value: Value,
-    transfer: TransferStats,
+    transport: CdpTransport,
+    session_mode: RendererSessionMode,
+    theme_chunks: usize,
+    css_chunks: usize,
+    art_chunks: usize,
+    data_bytes: usize,
+    elapsed_ms: u64,
+    renderer_timings: Value,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct TransferStats {
-    chunked_expressions: usize,
-    chunks: usize,
+struct ThemeSessionInstallation {
+    value: Value,
+    theme_chunks: usize,
+    css_chunks: usize,
+    art_chunks: usize,
+    data_bytes: usize,
+    elapsed_ms: u64,
+    renderer_timings: Value,
 }
 
-impl TransferStats {
-    fn add(&mut self, other: Self) {
-        self.chunked_expressions = self
-            .chunked_expressions
-            .saturating_add(other.chunked_expressions);
-        self.chunks = self.chunks.saturating_add(other.chunks);
+struct CdpAttemptError {
+    error: AppError,
+    retry_safe: bool,
+}
+
+impl CdpAttemptError {
+    fn retry_safe(error: AppError) -> Self {
+        Self {
+            error,
+            retry_safe: true,
+        }
+    }
+
+    fn terminal(error: AppError) -> Self {
+        let error = match error {
+            AppError::Runtime(message) => AppError::RendererInstallTerminal(message),
+            error => error,
+        };
+        Self {
+            error,
+            retry_safe: false,
+        }
     }
 }
+
+pub struct CdpProgress {
+    pub level: &'static str,
+    pub event: &'static str,
+    pub message: String,
+    pub data: Value,
+}
+
+pub type CdpProgressSink<'a> = &'a (dyn Fn(CdpProgress) + Sync);
 
 #[derive(Debug, Clone, Copy)]
 pub struct CdpApplyOutcome {
@@ -184,8 +223,10 @@ pub struct CdpApplyOutcome {
     pub browser_session_targets: usize,
     pub initialized_session_targets: usize,
     pub uninitialized_fallback_targets: usize,
-    pub chunked_transfer_targets: usize,
+    pub staged_transfer_targets: usize,
     pub transferred_chunks: usize,
+    pub transferred_bytes: usize,
+    pub install_elapsed_ms: u64,
 }
 
 impl CdpSession {
@@ -262,22 +303,65 @@ impl CdpSession {
             .unwrap_or(Value::Null))
     }
 
-    async fn evaluate_expression(
+    async fn install_theme(
         &mut self,
         session_id: Option<&str>,
-        expression: &str,
-    ) -> AppResult<EvaluatedValue> {
-        if !requires_chunking(expression) {
-            return Ok(EvaluatedValue {
-                value: self
-                    .evaluate(session_id, expression, EVALUATE_TIMEOUT)
-                    .await?,
-                transfer: TransferStats::default(),
-            });
-        }
+        target_id: &str,
+        payload: &RendererPayload,
+        progress: Option<CdpProgressSink<'_>>,
+    ) -> Result<ThemeSessionInstallation, CdpAttemptError> {
+        let started = Instant::now();
+        let plan = ThemeTransferPlan::new(payload);
+        emit_progress(
+            progress,
+            "info",
+            "cdp_theme_stage_started",
+            "Renderer theme staging started",
+            json!({
+                "targetId": target_id,
+                "endpoint": self.endpoint,
+                "themeKey": payload.theme_key(),
+                "engineBytes": payload.engine().len(),
+                "themeBytes": plan.theme_bytes(),
+                "themeSha256": plan.theme_sha256(),
+                "cssBytes": plan.css_bytes(),
+                "cssSha256": plan.css_sha256(),
+                "artBytes": plan.art_bytes(),
+                "artSha256": plan.art_sha256(),
+                "themeChunks": plan.theme_chunk_count(),
+                "cssChunks": plan.css_chunk_count(),
+                "artChunks": plan.art_chunk_count(),
+            }),
+        );
 
-        let plan = TransferPlan::new(expression);
-        let digest = plan.sha256().to_string();
+        let engine = self
+            .evaluate(session_id, payload.engine(), TRANSFER_COMMAND_TIMEOUT)
+            .await
+            .map_err(|error| {
+                CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                    "CDP 主题引擎初始化失败：{error}"
+                )))
+            })?;
+        if engine.get("ready").and_then(Value::as_bool) != Some(true)
+            || engine.get("engineVersion").and_then(Value::as_u64) != Some(1)
+        {
+            return Err(CdpAttemptError::retry_safe(AppError::Runtime(
+                "CDP 主题引擎未返回有效确认".into(),
+            )));
+        }
+        emit_progress(
+            progress,
+            "info",
+            "cdp_theme_engine_ready",
+            "Renderer theme engine is ready",
+            json!({
+                "targetId": target_id,
+                "endpoint": self.endpoint,
+                "elapsedMs": elapsed_ms(started),
+                "reused": engine.get("reused").and_then(Value::as_bool),
+            }),
+        );
+
         let initialize = plan.initialize_expression();
         let initialized = match self
             .evaluate(session_id, &initialize, TRANSFER_COMMAND_TIMEOUT)
@@ -285,69 +369,356 @@ impl CdpSession {
         {
             Ok(value) => value,
             Err(error) => {
-                self.cleanup_transfer(session_id, &plan).await;
-                return Err(AppError::Runtime(format!(
-                    "CDP 分片传输初始化失败，载荷 {} bytes，摘要 {digest}：{error}",
-                    plan.original_bytes()
-                )));
+                self.cleanup_theme_transfer(session_id, &plan).await;
+                return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                    "CDP 主题数据通道初始化失败：{error}"
+                ))));
             }
         };
-        if !transfer_acknowledged(&initialized, 0) {
-            self.cleanup_transfer(session_id, &plan).await;
-            return Err(AppError::Runtime(format!(
-                "CDP 分片传输初始化未被渲染器确认，摘要 {digest}"
+        if !theme_stage_acknowledged(&initialized, plan.token(), "initialized") {
+            self.cleanup_theme_transfer(session_id, &plan).await;
+            return Err(CdpAttemptError::retry_safe(AppError::Runtime(
+                "CDP 主题数据通道初始化未被渲染器确认".into(),
             )));
         }
 
-        for index in 0..plan.chunk_count() {
-            let append = plan.append_expression(index);
+        for index in 0..plan.theme_chunk_count() {
+            let expression = plan.theme_chunk_expression(index);
             let acknowledgement = match self
-                .evaluate(session_id, &append, TRANSFER_COMMAND_TIMEOUT)
+                .evaluate(session_id, &expression, TRANSFER_COMMAND_TIMEOUT)
                 .await
             {
                 Ok(value) => value,
                 Err(error) => {
-                    self.cleanup_transfer(session_id, &plan).await;
-                    return Err(AppError::Runtime(format!(
-                        "CDP 分片传输失败：分片 {}/{}，载荷 {} bytes，摘要 {digest}：{error}",
+                    self.cleanup_theme_transfer(session_id, &plan).await;
+                    return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                        "CDP 主题元数据分片传输失败：分片 {}/{}：{error}",
                         index + 1,
-                        plan.chunk_count(),
-                        plan.original_bytes()
-                    )));
+                        plan.theme_chunk_count(),
+                    ))));
                 }
             };
-            if !transfer_acknowledged(&acknowledgement, index + 1) {
-                self.cleanup_transfer(session_id, &plan).await;
-                return Err(AppError::Runtime(format!(
-                    "CDP 分片传输确认无效：分片 {}/{}，摘要 {digest}",
+            let expected_bytes = plan.theme_received_bytes_after(index);
+            if !theme_data_chunk_acknowledged(
+                &acknowledgement,
+                plan.token(),
+                "themeReceiving",
+                index + 1,
+                expected_bytes,
+            ) {
+                self.cleanup_theme_transfer(session_id, &plan).await;
+                return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                    "CDP 主题元数据分片确认无效：分片 {}/{}",
                     index + 1,
-                    plan.chunk_count()
-                )));
+                    plan.theme_chunk_count(),
+                ))));
+            }
+        }
+        emit_progress(
+            progress,
+            "info",
+            "cdp_theme_metadata_transferred",
+            "Renderer theme metadata transferred",
+            json!({
+                "targetId": target_id,
+                "endpoint": self.endpoint,
+                "themeBytes": plan.theme_bytes(),
+                "themeSha256": plan.theme_sha256(),
+                "themeChunks": plan.theme_chunk_count(),
+                "elapsedMs": elapsed_ms(started),
+            }),
+        );
+
+        for index in 0..plan.css_chunk_count() {
+            let expression = plan.css_chunk_expression(index);
+            let acknowledgement = match self
+                .evaluate(session_id, &expression, TRANSFER_COMMAND_TIMEOUT)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    self.cleanup_theme_transfer(session_id, &plan).await;
+                    return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                        "CDP 主题 CSS 分片传输失败：分片 {}/{}：{error}",
+                        index + 1,
+                        plan.css_chunk_count(),
+                    ))));
+                }
+            };
+            let expected_bytes = plan.css_received_bytes_after(index);
+            if !theme_data_chunk_acknowledged(
+                &acknowledgement,
+                plan.token(),
+                "cssReceiving",
+                index + 1,
+                expected_bytes,
+            ) {
+                self.cleanup_theme_transfer(session_id, &plan).await;
+                return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                    "CDP 主题 CSS 分片确认无效：分片 {}/{}",
+                    index + 1,
+                    plan.css_chunk_count(),
+                ))));
+            }
+        }
+        emit_progress(
+            progress,
+            "info",
+            "cdp_theme_css_transferred",
+            "Renderer theme CSS transferred",
+            json!({
+                "targetId": target_id,
+                "endpoint": self.endpoint,
+                "cssBytes": plan.css_bytes(),
+                "cssSha256": plan.css_sha256(),
+                "cssChunks": plan.css_chunk_count(),
+                "elapsedMs": elapsed_ms(started),
+            }),
+        );
+
+        for index in 0..plan.art_chunk_count() {
+            let expression = plan.art_chunk_expression(index);
+            let acknowledgement = match self
+                .evaluate(session_id, &expression, TRANSFER_COMMAND_TIMEOUT)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    self.cleanup_theme_transfer(session_id, &plan).await;
+                    return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                        "CDP 背景图分片传输失败：分片 {}/{}：{error}",
+                        index + 1,
+                        plan.art_chunk_count(),
+                    ))));
+                }
+            };
+            let expected_bytes = plan.art_received_bytes_after(index);
+            if !theme_data_chunk_acknowledged(
+                &acknowledgement,
+                plan.token(),
+                "artReceiving",
+                index + 1,
+                expected_bytes,
+            ) {
+                self.cleanup_theme_transfer(session_id, &plan).await;
+                return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                    "CDP 背景图分片确认无效：分片 {}/{}",
+                    index + 1,
+                    plan.art_chunk_count(),
+                ))));
+            }
+            if should_log_chunk(index + 1, plan.art_chunk_count()) {
+                emit_progress(
+                    progress,
+                    "info",
+                    "cdp_theme_art_progress",
+                    "Renderer theme art transfer progressed",
+                    json!({
+                        "targetId": target_id,
+                        "endpoint": self.endpoint,
+                        "receivedChunks": index + 1,
+                        "totalChunks": plan.art_chunk_count(),
+                        "receivedBytes": expected_bytes,
+                        "totalBytes": plan.art_bytes(),
+                        "elapsedMs": elapsed_ms(started),
+                    }),
+                );
             }
         }
 
-        let commit = plan.commit_expression();
-        let value = match self.evaluate(session_id, &commit, EVALUATE_TIMEOUT).await {
+        let start_expression = plan.start_expression();
+        let queued = match self
+            .evaluate(session_id, &start_expression, INSTALL_START_TIMEOUT)
+            .await
+        {
             Ok(value) => value,
             Err(error) => {
-                self.cleanup_transfer(session_id, &plan).await;
-                return Err(AppError::Runtime(format!(
-                    "CDP 分片载荷校验或执行失败，共 {} 个分片、{} bytes，摘要 {digest}：{error}",
-                    plan.chunk_count(),
-                    plan.original_bytes()
-                )));
+                emit_progress(
+                    progress,
+                    "error",
+                    "cdp_theme_install_failed",
+                    "Renderer theme installation start was not acknowledged",
+                    json!({
+                        "targetId": target_id,
+                        "endpoint": self.endpoint,
+                        "phase": "queueing",
+                        "elapsedMs": elapsed_ms(started),
+                        "error": error.to_string(),
+                        "retrySuppressed": true,
+                    }),
+                );
+                return Err(CdpAttemptError::terminal(AppError::Runtime(format!(
+                    "CDP 主题安装启动状态未知；为避免重复注入，不再回退重试：{error}"
+                ))));
             }
         };
-        Ok(EvaluatedValue {
-            value,
-            transfer: TransferStats {
-                chunked_expressions: 1,
-                chunks: plan.chunk_count(),
-            },
-        })
+        if !theme_stage_acknowledged(&queued, plan.token(), "queued") {
+            emit_install_failure(
+                progress,
+                target_id,
+                &self.endpoint,
+                "queueing",
+                elapsed_ms(started),
+                "renderer returned an invalid queue acknowledgement",
+            );
+            return Err(CdpAttemptError::terminal(AppError::Runtime(
+                "CDP 主题安装任务未被渲染器确认；为避免重复注入，不再回退重试".into(),
+            )));
+        }
+        emit_progress(
+            progress,
+            "info",
+            "cdp_theme_install_queued",
+            "Renderer theme installation queued",
+            json!({
+                "targetId": target_id,
+                "endpoint": self.endpoint,
+                "themeChunks": plan.theme_chunk_count(),
+                "cssChunks": plan.css_chunk_count(),
+                "artChunks": plan.art_chunk_count(),
+                "transferredBytes": payload.data_bytes(),
+                "elapsedMs": elapsed_ms(started),
+            }),
+        );
+
+        let status_expression = plan.status_expression();
+        let deadline = Instant::now() + INSTALL_DEADLINE;
+        let mut last_phase = "queued".to_string();
+        loop {
+            if Instant::now() >= deadline {
+                emit_install_failure(
+                    progress,
+                    target_id,
+                    &self.endpoint,
+                    &last_phase,
+                    elapsed_ms(started),
+                    "installation deadline exceeded",
+                );
+                return Err(CdpAttemptError::terminal(AppError::Runtime(format!(
+                    "CDP 主题安装在阶段 {last_phase} 超时；渲染页可能仍在执行，已停止回退重试"
+                ))));
+            }
+            sleep(INSTALL_POLL_INTERVAL).await;
+            let status = match self
+                .evaluate(session_id, &status_expression, INSTALL_POLL_TIMEOUT)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    emit_install_failure(
+                        progress,
+                        target_id,
+                        &self.endpoint,
+                        &last_phase,
+                        elapsed_ms(started),
+                        &error.to_string(),
+                    );
+                    return Err(CdpAttemptError::terminal(AppError::Runtime(format!(
+                        "CDP 主题安装在阶段 {last_phase} 后失去响应；为避免阻塞扩散，已停止回退重试：{error}"
+                    ))));
+                }
+            };
+            if status.get("accepted").and_then(Value::as_bool) != Some(true) {
+                emit_install_failure(
+                    progress,
+                    target_id,
+                    &self.endpoint,
+                    &last_phase,
+                    elapsed_ms(started),
+                    "renderer installation state is missing",
+                );
+                return Err(CdpAttemptError::terminal(AppError::Runtime(
+                    "CDP 主题安装状态已丢失；已停止回退重试".into(),
+                )));
+            }
+            let phase = status
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            if phase != last_phase {
+                last_phase = phase.to_string();
+                emit_progress(
+                    progress,
+                    "info",
+                    "cdp_theme_install_phase",
+                    "Renderer theme installation phase changed",
+                    json!({
+                        "targetId": target_id,
+                        "endpoint": self.endpoint,
+                        "phase": phase,
+                        "elapsedMs": elapsed_ms(started),
+                        "rendererTimings": status.get("timings").cloned().unwrap_or(Value::Null),
+                    }),
+                );
+            }
+            match phase {
+                "installed" => {
+                    let value = status.get("result").cloned().unwrap_or(Value::Null);
+                    let renderer_timings = status.get("timings").cloned().unwrap_or(Value::Null);
+                    self.cleanup_theme_transfer(session_id, &plan).await;
+                    let elapsed_ms = elapsed_ms(started);
+                    emit_progress(
+                        progress,
+                        "info",
+                        "cdp_theme_install_completed",
+                        "Renderer theme installation completed",
+                        json!({
+                            "targetId": target_id,
+                            "endpoint": self.endpoint,
+                            "elapsedMs": elapsed_ms,
+                            "rendererTimings": renderer_timings,
+                            "themeChunks": plan.theme_chunk_count(),
+                            "cssChunks": plan.css_chunk_count(),
+                            "artChunks": plan.art_chunk_count(),
+                            "transferredBytes": payload.data_bytes(),
+                        }),
+                    );
+                    return Ok(ThemeSessionInstallation {
+                        value,
+                        theme_chunks: plan.theme_chunk_count(),
+                        css_chunks: plan.css_chunk_count(),
+                        art_chunks: plan.art_chunk_count(),
+                        data_bytes: payload.data_bytes(),
+                        elapsed_ms,
+                        renderer_timings,
+                    });
+                }
+                "failed" => {
+                    let error = status
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown renderer failure");
+                    let failed_phase = status
+                        .get("failedPhase")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let timings = status.get("timings").cloned().unwrap_or(Value::Null);
+                    self.cleanup_theme_transfer(session_id, &plan).await;
+                    emit_progress(
+                        progress,
+                        "error",
+                        "cdp_theme_install_failed",
+                        "Renderer theme installation failed",
+                        json!({
+                            "targetId": target_id,
+                            "endpoint": self.endpoint,
+                            "phase": failed_phase,
+                            "elapsedMs": elapsed_ms(started),
+                            "rendererTimings": timings,
+                            "error": error,
+                            "retrySuppressed": true,
+                        }),
+                    );
+                    return Err(CdpAttemptError::terminal(AppError::Runtime(format!(
+                        "CDP 主题安装在渲染器阶段 {failed_phase} 失败：{error}"
+                    ))));
+                }
+                _ => {}
+            }
+        }
     }
 
-    async fn cleanup_transfer(&mut self, session_id: Option<&str>, plan: &TransferPlan) {
+    async fn cleanup_theme_transfer(&mut self, session_id: Option<&str>, plan: &ThemeTransferPlan) {
         let cleanup = plan.cleanup_expression();
         let _ = self
             .evaluate(session_id, &cleanup, TRANSFER_CLEANUP_TIMEOUT)
@@ -438,6 +809,78 @@ impl CdpSession {
     async fn close(mut self) {
         let _ = self.stream.close(None).await;
     }
+}
+
+fn emit_progress(
+    progress: Option<CdpProgressSink<'_>>,
+    level: &'static str,
+    event: &'static str,
+    message: impl Into<String>,
+    data: Value,
+) {
+    if let Some(progress) = progress {
+        progress(CdpProgress {
+            level,
+            event,
+            message: message.into(),
+            data,
+        });
+    }
+}
+
+fn emit_install_failure(
+    progress: Option<CdpProgressSink<'_>>,
+    target_id: &str,
+    endpoint: &str,
+    phase: &str,
+    elapsed_ms: u64,
+    error: &str,
+) {
+    emit_progress(
+        progress,
+        "error",
+        "cdp_theme_install_failed",
+        "Renderer theme installation became unresponsive",
+        json!({
+            "targetId": target_id,
+            "endpoint": endpoint,
+            "phase": phase,
+            "elapsedMs": elapsed_ms,
+            "error": error,
+            "retrySuppressed": true,
+        }),
+    );
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn theme_stage_acknowledged(value: &Value, token: &str, phase: &str) -> bool {
+    value.get("accepted").and_then(Value::as_bool) == Some(true)
+        && value.get("token").and_then(Value::as_str) == Some(token)
+        && value.get("phase").and_then(Value::as_str) == Some(phase)
+}
+
+fn theme_data_chunk_acknowledged(
+    value: &Value,
+    token: &str,
+    phase: &str,
+    expected_chunks: usize,
+    expected_bytes: usize,
+) -> bool {
+    theme_stage_acknowledged(value, token, phase)
+        && value.get("receivedChunks").and_then(Value::as_u64)
+            == u64::try_from(expected_chunks).ok()
+        && value.get("receivedBytes").and_then(Value::as_u64) == u64::try_from(expected_bytes).ok()
+}
+
+fn should_log_chunk(completed: usize, total: usize) -> bool {
+    if completed == 1 || completed == total {
+        return true;
+    }
+    let interval = total.div_ceil(4).max(1);
+    completed % interval == 0
 }
 
 fn command_request(id: u64, session_id: Option<&str>, method: &str, params: Value) -> Value {
@@ -614,7 +1057,8 @@ pub async fn apply_to_verified_targets(
     client: &Client,
     port: u16,
     browser_id: &str,
-    payload: &str,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
 ) -> AppResult<CdpApplyOutcome> {
     let targets = verified_targets(client, port, browser_id).await?;
     let mut applied = 0;
@@ -622,37 +1066,52 @@ pub async fn apply_to_verified_targets(
     let mut browser_session_targets = 0;
     let mut initialized_session_targets = 0;
     let mut uninitialized_fallback_targets = 0;
-    let mut chunked_transfer_targets = 0;
+    let mut staged_transfer_targets = 0;
     let mut transferred_chunks: usize = 0;
+    let mut transferred_bytes: usize = 0;
+    let mut install_elapsed_ms: u64 = 0;
     let mut last_error = None;
-    let guarded_payload = guarded_expression(payload);
     for target in targets {
-        match evaluate_many(client, &target, port, browser_id, &[&guarded_payload]).await {
-            Ok(evaluation)
-                if probe_is_codex(evaluation.values.first())
-                    && theme_install_is_confirmed(evaluation.values.first()) =>
-            {
+        match install_theme_to_target(client, &target, port, browser_id, payload, progress).await {
+            Ok(installation) if theme_install_result_is_confirmed(&installation.value) => {
                 applied += 1;
-                match evaluation.transport {
+                match installation.transport {
                     CdpTransport::DirectPage => direct_targets += 1,
                     CdpTransport::BrowserSession => browser_session_targets += 1,
                 }
-                match evaluation.session_mode {
+                match installation.session_mode {
                     RendererSessionMode::Initialized => initialized_session_targets += 1,
                     RendererSessionMode::UninitializedFallback => {
                         uninitialized_fallback_targets += 1
                     }
                 }
-                if evaluation.transfer.chunked_expressions > 0 {
-                    chunked_transfer_targets += 1;
-                    transferred_chunks =
-                        transferred_chunks.saturating_add(evaluation.transfer.chunks);
-                }
+                staged_transfer_targets += 1;
+                transferred_chunks = transferred_chunks
+                    .saturating_add(installation.theme_chunks)
+                    .saturating_add(installation.css_chunks)
+                    .saturating_add(installation.art_chunks);
+                transferred_bytes = transferred_bytes.saturating_add(installation.data_bytes);
+                install_elapsed_ms = install_elapsed_ms.saturating_add(installation.elapsed_ms);
+                emit_progress(
+                    progress,
+                    "info",
+                    "cdp_theme_target_completed",
+                    "Theme installed on a verified Codex renderer",
+                    json!({
+                        "targetId": target.id,
+                        "transport": installation.transport.as_str(),
+                        "sessionMode": installation.session_mode.as_str(),
+                        "themeChunks": installation.theme_chunks,
+                        "cssChunks": installation.css_chunks,
+                        "artChunks": installation.art_chunks,
+                        "transferredBytes": installation.data_bytes,
+                        "elapsedMs": installation.elapsed_ms,
+                        "rendererTimings": installation.renderer_timings,
+                    }),
+                );
             }
-            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
-                last_error = Some("主题样式未完成挂载".to_string())
-            }
-            Ok(_) => last_error = Some("页面尚未达到安全可注入状态".to_string()),
+            Ok(_) => last_error = Some("主题样式未完成挂载".to_string()),
+            Err(error) if error.is_renderer_install_terminal() => return Err(error),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
@@ -668,8 +1127,10 @@ pub async fn apply_to_verified_targets(
         browser_session_targets,
         initialized_session_targets,
         uninitialized_fallback_targets,
-        chunked_transfer_targets,
+        staged_transfer_targets,
         transferred_chunks,
+        transferred_bytes,
+        install_elapsed_ms,
     })
 }
 
@@ -678,11 +1139,11 @@ pub async fn ensure_theme_on_verified_targets(
     port: u16,
     browser_id: &str,
     theme_key: &str,
-    payload: &str,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
 ) -> AppResult<usize> {
     let targets = verified_targets(client, port, browser_id).await?;
     let health = guarded_expression(&theme_health_expression(theme_key)?);
-    let mut guarded_payload = None;
     let mut healthy = 0;
     let mut last_error = None;
     for target in targets {
@@ -705,26 +1166,12 @@ pub async fn ensure_theme_on_verified_targets(
             }
         }
 
-        let guarded_payload = guarded_payload.get_or_insert_with(|| guarded_expression(payload));
-        match evaluate_many(
-            client,
-            &target,
-            port,
-            browser_id,
-            &[guarded_payload.as_str()],
-        )
-        .await
-        {
-            Ok(evaluation)
-                if probe_is_codex(evaluation.values.first())
-                    && theme_install_is_confirmed(evaluation.values.first()) =>
-            {
+        match install_theme_to_target(client, &target, port, browser_id, payload, progress).await {
+            Ok(installation) if theme_install_result_is_confirmed(&installation.value) => {
                 healthy += 1
             }
-            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
-                last_error = Some("重注入后主题样式未完成挂载".to_string())
-            }
-            Ok(_) => last_error = Some("页面在重注入前尚未达到安全可注入状态".to_string()),
+            Ok(_) => last_error = Some("重注入后主题样式未完成挂载".to_string()),
+            Err(error) if error.is_renderer_install_terminal() => return Err(error),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
@@ -782,6 +1229,233 @@ async fn fetch_json<T: DeserializeOwned>(
     response.json().await.map_err(AppError::Network)
 }
 
+async fn install_theme_to_target(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
+) -> AppResult<ThemeInstallation> {
+    let direct_error = match install_theme_direct(target, port, payload, progress).await {
+        Ok(installation) => return Ok(installation),
+        Err(error) if !error.retry_safe => return Err(error.error),
+        Err(error) => error.error,
+    };
+    match install_theme_attached(client, target, port, browser_id, payload, progress).await {
+        Ok(installation) => Ok(installation),
+        Err(browser_error) if !browser_error.retry_safe => Err(browser_error.error),
+        Err(browser_error) => Err(AppError::Runtime(format!(
+            "CDP 页面直连与浏览器会话均未能开始安全安装；页面直连：{direct_error}；浏览器会话：{}",
+            browser_error.error
+        ))),
+    }
+}
+
+async fn install_theme_direct(
+    target: &CdpTarget,
+    port: u16,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
+) -> Result<ThemeInstallation, CdpAttemptError> {
+    let initialized_error =
+        match install_theme_direct_attempt(target, port, payload, progress, true).await {
+            Ok(installation) => {
+                return Ok(ThemeInstallation {
+                    value: installation.value,
+                    transport: CdpTransport::DirectPage,
+                    session_mode: RendererSessionMode::Initialized,
+                    theme_chunks: installation.theme_chunks,
+                    css_chunks: installation.css_chunks,
+                    art_chunks: installation.art_chunks,
+                    data_bytes: installation.data_bytes,
+                    elapsed_ms: installation.elapsed_ms,
+                    renderer_timings: installation.renderer_timings,
+                })
+            }
+            Err(error) if !error.retry_safe => return Err(error),
+            Err(error) => error.error,
+        };
+    match install_theme_direct_attempt(target, port, payload, progress, false).await {
+        Ok(installation) => Ok(ThemeInstallation {
+            value: installation.value,
+            transport: CdpTransport::DirectPage,
+            session_mode: RendererSessionMode::UninitializedFallback,
+            theme_chunks: installation.theme_chunks,
+            css_chunks: installation.css_chunks,
+            art_chunks: installation.art_chunks,
+            data_bytes: installation.data_bytes,
+            elapsed_ms: installation.elapsed_ms,
+            renderer_timings: installation.renderer_timings,
+        }),
+        Err(error) if !error.retry_safe => Err(error),
+        Err(error) => Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+            "页面初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{}",
+            error.error
+        )))),
+    }
+}
+
+async fn install_theme_direct_attempt(
+    target: &CdpTarget,
+    port: u16,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
+    initialize: bool,
+) -> Result<ThemeSessionInstallation, CdpAttemptError> {
+    let mut session = CdpSession::connect_page(target, port)
+        .await
+        .map_err(CdpAttemptError::retry_safe)?;
+    if initialize {
+        session
+            .initialize_renderer(None)
+            .await
+            .map_err(CdpAttemptError::retry_safe)?;
+    }
+    let probe = session
+        .evaluate(None, PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT)
+        .await
+        .map_err(CdpAttemptError::retry_safe)?;
+    if !probe_is_codex(Some(&probe)) {
+        return Err(CdpAttemptError::retry_safe(AppError::Runtime(
+            "页面直连探针未确认可注入的 Codex 文档".into(),
+        )));
+    }
+    let result = session
+        .install_theme(None, &target.id, payload, progress)
+        .await;
+    let should_close = match &result {
+        Ok(_) => true,
+        Err(error) => error.retry_safe,
+    };
+    if should_close {
+        session.close().await;
+    }
+    result
+}
+
+async fn install_theme_attached(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
+) -> Result<ThemeInstallation, CdpAttemptError> {
+    let initialized_error = match install_theme_attached_attempt(
+        client, target, port, browser_id, payload, progress, true,
+    )
+    .await
+    {
+        Ok(installation) => {
+            return Ok(ThemeInstallation {
+                value: installation.value,
+                transport: CdpTransport::BrowserSession,
+                session_mode: RendererSessionMode::Initialized,
+                theme_chunks: installation.theme_chunks,
+                css_chunks: installation.css_chunks,
+                art_chunks: installation.art_chunks,
+                data_bytes: installation.data_bytes,
+                elapsed_ms: installation.elapsed_ms,
+                renderer_timings: installation.renderer_timings,
+            })
+        }
+        Err(error) if !error.retry_safe => return Err(error),
+        Err(error) => error.error,
+    };
+    match install_theme_attached_attempt(
+        client, target, port, browser_id, payload, progress, false,
+    )
+    .await
+    {
+        Ok(installation) => Ok(ThemeInstallation {
+            value: installation.value,
+            transport: CdpTransport::BrowserSession,
+            session_mode: RendererSessionMode::UninitializedFallback,
+            theme_chunks: installation.theme_chunks,
+            css_chunks: installation.css_chunks,
+            art_chunks: installation.art_chunks,
+            data_bytes: installation.data_bytes,
+            elapsed_ms: installation.elapsed_ms,
+            renderer_timings: installation.renderer_timings,
+        }),
+        Err(error) if !error.retry_safe => Err(error),
+        Err(error) => Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+            "浏览器初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{}",
+            error.error
+        )))),
+    }
+}
+
+async fn install_theme_attached_attempt(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+    payload: &RendererPayload,
+    progress: Option<CdpProgressSink<'_>>,
+    initialize: bool,
+) -> Result<ThemeSessionInstallation, CdpAttemptError> {
+    let mut browser = CdpSession::connect_browser(client, port, browser_id)
+        .await
+        .map_err(CdpAttemptError::retry_safe)?;
+    let attached = browser
+        .command(
+            None,
+            "Target.attachToTarget",
+            json!({ "targetId": target.id.as_str(), "flatten": true }),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        .map_err(CdpAttemptError::retry_safe)?;
+    let session_id = attached
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_identifier(value))
+        .ok_or_else(|| {
+            CdpAttemptError::retry_safe(AppError::Runtime("CDP 浏览器附加会话身份无效".into()))
+        })?
+        .to_string();
+    if initialize {
+        browser
+            .initialize_renderer(Some(session_id.as_str()))
+            .await
+            .map_err(CdpAttemptError::retry_safe)?;
+    }
+    let probe = browser
+        .evaluate(
+            Some(session_id.as_str()),
+            PROBE_EXPRESSION,
+            RENDERER_PROBE_TIMEOUT,
+        )
+        .await
+        .map_err(CdpAttemptError::retry_safe)?;
+    if !probe_is_codex(Some(&probe)) {
+        return Err(CdpAttemptError::retry_safe(AppError::Runtime(
+            "浏览器附加探针未确认可注入的 Codex 文档".into(),
+        )));
+    }
+    let result = browser
+        .install_theme(Some(session_id.as_str()), &target.id, payload, progress)
+        .await;
+    let should_close = match &result {
+        Ok(_) => true,
+        Err(error) => error.retry_safe,
+    };
+    if should_close {
+        let _ = browser
+            .command(
+                None,
+                "Target.detachFromTarget",
+                json!({ "sessionId": session_id }),
+                COMMAND_TIMEOUT,
+            )
+            .await;
+        browser.close().await;
+    }
+    result
+}
+
 async fn evaluate_many(
     client: &Client,
     target: &CdpTarget,
@@ -795,7 +1469,6 @@ async fn evaluate_many(
                 values: evaluation.values,
                 transport: CdpTransport::DirectPage,
                 session_mode: evaluation.mode,
-                transfer: evaluation.transfer,
             })
         }
         Err(error) => error,
@@ -805,7 +1478,6 @@ async fn evaluate_many(
             values: evaluation.values,
             transport: CdpTransport::BrowserSession,
             session_mode: evaluation.mode,
-            transfer: evaluation.transfer,
         }),
         Err(browser_error) => Err(AppError::Runtime(format!(
             "CDP 页面直连与浏览器会话均失败；页面直连：{direct_error}；浏览器会话：{browser_error}"
@@ -820,20 +1492,18 @@ async fn evaluate_many_direct(
 ) -> AppResult<SessionEvaluation> {
     let initialized_error =
         match evaluate_many_direct_attempt(target, port, expressions, true).await {
-            Ok((values, transfer)) => {
+            Ok(values) => {
                 return Ok(SessionEvaluation {
                     values,
                     mode: RendererSessionMode::Initialized,
-                    transfer,
                 })
             }
             Err(error) => error,
         };
     match evaluate_many_direct_attempt(target, port, expressions, false).await {
-        Ok((values, transfer)) => Ok(SessionEvaluation {
+        Ok(values) => Ok(SessionEvaluation {
             values,
             mode: RendererSessionMode::UninitializedFallback,
-            transfer,
         }),
         Err(fallback_error) => Err(AppError::Runtime(format!(
             "页面初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{fallback_error}"
@@ -846,7 +1516,7 @@ async fn evaluate_many_direct_attempt(
     port: u16,
     expressions: &[&str],
     initialize: bool,
-) -> AppResult<(Vec<Value>, TransferStats)> {
+) -> AppResult<Vec<Value>> {
     let mut session = CdpSession::connect_page(target, port).await?;
     if initialize {
         session.initialize_renderer(None).await?;
@@ -860,14 +1530,11 @@ async fn evaluate_many_direct_attempt(
         ));
     }
     let mut values = Vec::with_capacity(expressions.len());
-    let mut transfer = TransferStats::default();
     for expression in expressions {
-        let evaluated = session.evaluate_expression(None, expression).await?;
-        values.push(evaluated.value);
-        transfer.add(evaluated.transfer);
+        values.push(session.evaluate(None, expression, EVALUATE_TIMEOUT).await?);
     }
     session.close().await;
-    Ok((values, transfer))
+    Ok(values)
 }
 
 async fn evaluate_many_attached(
@@ -881,21 +1548,19 @@ async fn evaluate_many_attached(
         match evaluate_many_attached_attempt(client, target, port, browser_id, expressions, true)
             .await
         {
-            Ok((values, transfer)) => {
+            Ok(values) => {
                 return Ok(SessionEvaluation {
                     values,
                     mode: RendererSessionMode::Initialized,
-                    transfer,
                 })
             }
             Err(error) => error,
         };
     match evaluate_many_attached_attempt(client, target, port, browser_id, expressions, false).await
     {
-        Ok((values, transfer)) => Ok(SessionEvaluation {
+        Ok(values) => Ok(SessionEvaluation {
             values,
             mode: RendererSessionMode::UninitializedFallback,
-            transfer,
         }),
         Err(fallback_error) => Err(AppError::Runtime(format!(
             "浏览器初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{fallback_error}"
@@ -910,7 +1575,7 @@ async fn evaluate_many_attached_attempt(
     browser_id: &str,
     expressions: &[&str],
     initialize: bool,
-) -> AppResult<(Vec<Value>, TransferStats)> {
+) -> AppResult<Vec<Value>> {
     let mut browser = CdpSession::connect_browser(client, port, browser_id).await?;
     let attached = browser
         .command(
@@ -945,15 +1610,14 @@ async fn evaluate_many_attached_attempt(
             ));
         }
         let mut values = Vec::with_capacity(expressions.len());
-        let mut transfer = TransferStats::default();
         for expression in expressions {
-            let evaluated = browser
-                .evaluate_expression(Some(session_id.as_str()), expression)
-                .await?;
-            values.push(evaluated.value);
-            transfer.add(evaluated.transfer);
+            values.push(
+                browser
+                    .evaluate(Some(session_id.as_str()), expression, EVALUATE_TIMEOUT)
+                    .await?,
+            );
         }
-        Ok((values, transfer))
+        Ok(values)
     }
     .await;
     let _ = browser
@@ -975,12 +1639,6 @@ fn probe_is_codex(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-fn transfer_acknowledged(value: &Value, expected_chunks: usize) -> bool {
-    value.get("accepted").and_then(Value::as_bool) == Some(true)
-        && value.get("receivedChunks").and_then(Value::as_u64)
-            == u64::try_from(expected_chunks).ok()
-}
-
 fn action_result_is_true(value: Option<&Value>) -> bool {
     value
         .and_then(|value| value.get("result"))
@@ -988,8 +1646,7 @@ fn action_result_is_true(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-fn theme_install_is_confirmed(value: Option<&Value>) -> bool {
-    let result = value.and_then(|value| value.get("result"));
+fn theme_install_result_is_confirmed(result: &Value) -> bool {
     [
         "installed",
         "styleAttached",
@@ -998,12 +1655,7 @@ fn theme_install_is_confirmed(value: Option<&Value>) -> bool {
         "chromeAttached",
     ]
     .into_iter()
-    .all(|field| {
-        result
-            .and_then(|value| value.get(field))
-            .and_then(Value::as_bool)
-            == Some(true)
-    })
+    .all(|field| result.get(field).and_then(Value::as_bool) == Some(true))
 }
 
 fn theme_health_expression(theme_key: &str) -> AppResult<String> {
@@ -1205,18 +1857,41 @@ mod tests {
     }
 
     #[test]
-    fn chunk_acknowledgements_require_acceptance_and_exact_progress() {
-        assert!(transfer_acknowledged(
-            &json!({ "accepted": true, "receivedChunks": 2 }),
-            2
+    fn queued_install_failures_are_typed_as_terminal() {
+        let error = CdpAttemptError::terminal(AppError::Runtime("renderer stalled".into()));
+        assert!(!error.retry_safe);
+        assert!(error.error.is_renderer_install_terminal());
+    }
+
+    #[test]
+    fn staged_theme_acknowledgements_require_token_phase_and_exact_progress() {
+        let value = json!({
+            "accepted": true,
+            "token": "attempt-1",
+            "phase": "artReceiving",
+            "receivedChunks": 2,
+            "receivedBytes": 1024,
+        });
+        assert!(theme_data_chunk_acknowledged(
+            &value,
+            "attempt-1",
+            "artReceiving",
+            2,
+            1024,
         ));
-        assert!(!transfer_acknowledged(
-            &json!({ "accepted": true, "receivedChunks": 1 }),
-            2
+        assert!(!theme_data_chunk_acknowledged(
+            &value,
+            "other-attempt",
+            "artReceiving",
+            2,
+            1024,
         ));
-        assert!(!transfer_acknowledged(
-            &json!({ "accepted": false, "receivedChunks": 2 }),
-            2
+        assert!(!theme_data_chunk_acknowledged(
+            &value,
+            "attempt-1",
+            "cssReceiving",
+            2,
+            1024,
         ));
     }
 
@@ -1264,35 +1939,29 @@ mod tests {
     #[test]
     fn theme_install_requires_observable_renderer_state() {
         let value = json!({
-            "result": {
-                "installed": true,
-                "styleAttached": true,
-                "rootTagged": true,
-                "artAttached": true,
-                "chromeAttached": true,
-            }
+            "installed": true,
+            "styleAttached": true,
+            "rootTagged": true,
+            "artAttached": true,
+            "chromeAttached": true,
         });
-        assert!(theme_install_is_confirmed(Some(&value)));
+        assert!(theme_install_result_is_confirmed(&value));
         let missing_style = json!({
-            "result": {
-                "installed": true,
-                "styleAttached": false,
-                "rootTagged": true,
-                "artAttached": true,
-                "chromeAttached": true,
-            }
+            "installed": true,
+            "styleAttached": false,
+            "rootTagged": true,
+            "artAttached": true,
+            "chromeAttached": true,
         });
-        assert!(!theme_install_is_confirmed(Some(&missing_style)));
+        assert!(!theme_install_result_is_confirmed(&missing_style));
         let missing_chrome = json!({
-            "result": {
-                "installed": true,
-                "styleAttached": true,
-                "rootTagged": true,
-                "artAttached": true,
-                "chromeAttached": false,
-            }
+            "installed": true,
+            "styleAttached": true,
+            "rootTagged": true,
+            "artAttached": true,
+            "chromeAttached": false,
         });
-        assert!(!theme_install_is_confirmed(Some(&missing_chrome)));
+        assert!(!theme_install_result_is_confirmed(&missing_chrome));
     }
 
     #[test]

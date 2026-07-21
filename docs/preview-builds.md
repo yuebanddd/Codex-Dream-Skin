@@ -68,3 +68,5 @@ SignPath 申请与仓库配置见 [SignPath 配置指南](./signpath-setup.md)�
 如有问题，直接提供持久运行日志 `runtime.jsonl`；无需再手动导出诊断 JSON。日志达到 1 MiB 后轮换为同目录的 `runtime.previous.jsonl`。运行诊断页面会显示日志的完整路径。
 
 日志自动记录客户端版本、构建提交、主题标识、Codex/CDP 身份、路径、端口、目标数量、失败阶段，以及受数量和长度限制的 DOM 结构指纹。每个目标单独限时，某个页面无响应时仍会保留目标列表和其他已完成结果。结构指纹只包含标签名、元素 ID、角色、测试 ID、class 名和布尔标记；不采集页面标题、文本、表单值、URL 查询参数、存储内容或对话。日志也不写入主题 CSS/图片、API Key 或 `auth.json`。macOS/Linux 日志文件固定为仅所有者可读写的 `0600`；日志仍可能包含本机路径和 CDP 目标标识，公开提交前请先检查并移除不希望披露的信息。
+
+主题应用使用分阶段日志定位渲染器故障：`cdp_theme_stage_started` 记录元数据、CSS、图片的载荷大小、摘要和分片数，`cdp_theme_metadata_transferred` 与 `cdp_theme_css_transferred` 记录前两类数据传输完成，`cdp_theme_art_progress` 记录图片分片里程碑，`cdp_theme_install_queued` 表示异步安装已经排队，`cdp_theme_install_phase` 记录元数据校验、CSS 校验、图片组装校验和挂载阶段，最终由 `cdp_theme_install_completed` 或 `cdp_theme_install_failed` 收口。若安装排队后渲染器失去响应，`cdp_theme_install_terminal` 或 `watcher_install_terminal` 会带有 `retrySuppressed: true`，表示客户端已主动停止自动回退和重复注入。

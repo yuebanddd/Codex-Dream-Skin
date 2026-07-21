@@ -1,6 +1,6 @@
 [package]
 name = "lumadrobe"
-version = "0.5.9"
+version = "0.5.10"
 description = "A decentralized desktop theme wardrobe"
 authors = ["LumaDrobe contributors"]
 license = "MIT"

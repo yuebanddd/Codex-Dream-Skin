@@ -1,13 +1,80 @@
 use crate::error::{AppError, AppResult};
 use crate::models::InstalledSkin;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const IMAGE_LIMIT: u64 = 32 * 1024 * 1024;
 const CSS_LIMIT: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct RendererPayload {
+    theme_key: String,
+    theme_json: String,
+    css: String,
+    art_mime: String,
+    art: Vec<u8>,
+    engine: String,
+}
+
+impl RendererPayload {
+    pub fn theme_key(&self) -> &str {
+        &self.theme_key
+    }
+
+    pub fn theme_json(&self) -> &str {
+        &self.theme_json
+    }
+
+    pub fn css(&self) -> &str {
+        &self.css
+    }
+
+    pub fn art_mime(&self) -> &str {
+        &self.art_mime
+    }
+
+    pub fn art(&self) -> &[u8] {
+        &self.art
+    }
+
+    pub fn engine(&self) -> &str {
+        &self.engine
+    }
+
+    pub fn data_bytes(&self) -> usize {
+        self.theme_json.len() + self.css.len() + self.art.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(theme_key: &str, css: &str, art_mime: &str, art: Vec<u8>) -> Self {
+        Self::test_fixture_with_name(theme_key, "Fixture", css, art_mime, art)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture_with_name(
+        theme_key: &str,
+        name: &str,
+        css: &str,
+        art_mime: &str,
+        art: Vec<u8>,
+    ) -> Self {
+        Self {
+            theme_key: theme_key.into(),
+            theme_json: serde_json::to_string(&json!({
+                "key": theme_key,
+                "id": "fixture",
+                "name": name,
+                "version": "1.0.0",
+            }))
+            .expect("fixture theme is serializable"),
+            css: css.into(),
+            art_mime: art_mime.into(),
+            art,
+            engine: "(() => true)()".into(),
+        }
+    }
+}
 
 const BASE_CSS: &str = r#"
 html.lumadrobe-theme {
@@ -38,7 +105,7 @@ html.lumadrobe-theme .composer-surface-chrome {
 }
 "#;
 
-pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
+pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     let background = read_verified_asset(
         installed,
         Path::new(&installed.background_path),
@@ -46,7 +113,6 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
         "背景图",
     )?;
     let mime = image_mime(&background)?;
-    let art_data_url = format!("data:{mime};base64,{}", STANDARD.encode(background));
     let custom_css = if let Some(path) = &installed.css_path {
         let bytes = read_verified_asset(installed, Path::new(path), CSS_LIMIT, "主题 CSS")?;
         std::str::from_utf8(&bytes)
@@ -56,23 +122,30 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
         String::new()
     };
     let css = format!("{BASE_CSS}\n{custom_css}");
+    let theme_key = format!(
+        "{}:{}@{}",
+        installed.source_id, installed.skin_id, installed.version
+    );
     let theme = json!({
-        "key": format!(
-            "{}:{}@{}",
-            installed.source_id, installed.skin_id, installed.version
-        ),
+        "key": theme_key,
         "id": installed.skin_id,
         "name": installed.name,
         "version": installed.version,
     });
     let theme_json = serde_json::to_string(&theme)?;
-    let css_json = serde_json::to_string(&css)?;
-    let art_json = serde_json::to_string(&art_data_url)?;
 
-    Ok(format!(
-        r#"((theme, cssText, artDataUrl) => {{
+    let engine = format!(
+        r#"(() => {{
+  const ENGINE_KEY = "__LUMADROBE_ENGINE__";
+  const ENGINE_VERSION = 1;
+  const currentEngine = window[ENGINE_KEY];
+  if (currentEngine?.engineVersion === ENGINE_VERSION &&
+      typeof currentEngine?.install === "function") {{
+    return {{ ready: true, engineVersion: ENGINE_VERSION, reused: true }};
+  }}
+  const install = (theme, cssText, artBlob) => {{
   const STATE_KEY = "__LUMADROBE_RUNTIME__";
-  const RUNTIME_VERSION = 2;
+  const RUNTIME_VERSION = 3;
   const STYLE_ID = "lumadrobe-theme-style";
   const CHROME_ID = "codex-dream-skin-chrome";
   const ROOT_CLASSES = ["lumadrobe-theme", "codex-dream-skin"];
@@ -86,12 +159,8 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   previous?.cleanup?.();
   window.__CODEX_DREAM_SKIN_STATE__?.cleanup?.();
 
-  const comma = artDataUrl.indexOf(",");
-  const binary = atob(artDataUrl.slice(comma + 1));
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  const mime = artDataUrl.slice(5, comma).split(";")[0];
-  const artUrl = URL.createObjectURL(new Blob([bytes], {{ type: mime }}));
+  if (!(artBlob instanceof Blob) || artBlob.size < 1) throw new Error("LumaDrobe art Blob is invalid");
+  const artUrl = URL.createObjectURL(artBlob);
   const touched = new Set();
   const hasChromeCss = cssText.includes(`#${{CHROME_ID}}`);
   const chromeProfile = hasChromeCss && cssText.includes(".dream-skin-brand")
@@ -363,8 +432,20 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<String> {
   }};
   ensure();
   return {{ ...status(), themeKey: theme.key, reused: false }};
-}})({theme_json}, {css_json}, {art_json})"#
-    ))
+  }};
+  window[ENGINE_KEY] = {{ engineVersion: ENGINE_VERSION, install }};
+  return {{ ready: true, engineVersion: ENGINE_VERSION, reused: false }};
+}})()"#
+    );
+
+    Ok(RendererPayload {
+        theme_key: theme["key"].as_str().unwrap_or_default().to_string(),
+        theme_json,
+        css,
+        art_mime: mime.to_string(),
+        art: background,
+        engine,
+    })
 }
 
 fn read_verified_asset(
@@ -470,28 +551,44 @@ mod tests {
     fn builds_a_static_payload_from_verified_assets() {
         let (root, skin) = fixture();
         let payload = build_payload(&skin).unwrap();
-        assert!(payload.contains("__LUMADROBE_RUNTIME__"));
-        assert!(payload.contains("runtimeVersion: RUNTIME_VERSION"));
-        assert!(payload.contains("data:image/png;base64"));
-        assert!(payload.contains("source:night@1.0.0"));
-        assert!(payload.contains("codex-dream-skin"));
-        assert!(payload.contains("--dream-art"));
-        assert!(payload.contains("--dream-skin-art"));
-        assert!(payload.contains("styleAttached"));
-        assert!(payload.contains("rootTagged"));
-        assert!(payload.contains("artAttached"));
-        assert!(payload.contains("chromeAttached"));
-        assert!(payload.contains("codex-dream-skin-chrome"));
-        assert!(payload.contains("chromeIsReady"));
+        assert!(payload.engine().contains("__LUMADROBE_RUNTIME__"));
+        assert!(payload.engine().contains("__LUMADROBE_ENGINE__"));
+        assert!(payload.engine().contains("runtimeVersion: RUNTIME_VERSION"));
+        assert!(!payload.engine().contains("data:image/png;base64"));
+        assert_eq!(payload.theme_key(), "source:night@1.0.0");
+        assert!(payload.theme_json().contains("source:night@1.0.0"));
+        assert_eq!(payload.art_mime(), "image/png");
+        assert_eq!(payload.art(), b"\x89PNG\r\n\x1a\nfixture");
+        assert!(payload.engine().len() < 192 * 1024);
+        assert!(payload.engine().contains("codex-dream-skin"));
+        assert!(payload.engine().contains("--dream-art"));
+        assert!(payload.engine().contains("--dream-skin-art"));
+        assert!(payload.engine().contains("styleAttached"));
+        assert!(payload.engine().contains("rootTagged"));
+        assert!(payload.engine().contains("artAttached"));
+        assert!(payload.engine().contains("chromeAttached"));
+        assert!(payload.engine().contains("codex-dream-skin-chrome"));
+        assert!(payload.engine().contains("chromeIsReady"));
         let appearance = payload
+            .engine()
             .find("readInitialComputedMode() || previousSystemMode")
             .unwrap();
-        let mutation = payload.find("root.classList.add(...ROOT_CLASSES)").unwrap();
+        let mutation = payload
+            .engine()
+            .find("root.classList.add(...ROOT_CLASSES)")
+            .unwrap();
         assert!(appearance < mutation);
-        assert!(payload.contains("root.setAttribute(\"data-dream-shell\", refreshShellMode())"));
-        assert!(payload.contains("mediaQuery.addEventListener(\"change\", mediaHandler)"));
-        assert!(payload.contains("classify(body?.getAttribute(\"data-theme\"))"));
         assert!(payload
+            .engine()
+            .contains("root.setAttribute(\"data-dream-shell\", refreshShellMode())"));
+        assert!(payload
+            .engine()
+            .contains("mediaQuery.addEventListener(\"change\", mediaHandler)"));
+        assert!(payload
+            .engine()
+            .contains("classify(body?.getAttribute(\"data-theme\"))"));
+        assert!(payload
+            .engine()
             .contains("candidates.find((value) => value === \"dark\" || value === \"light\")"));
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -20,6 +20,14 @@ pub enum AppError {
     UnsafeAsset(String),
     #[error("皮肤引擎无法继续：{0}")]
     Runtime(String),
+    #[error("皮肤引擎无法继续：{0}")]
+    RendererInstallTerminal(String),
+}
+
+impl AppError {
+    pub(crate) fn is_renderer_install_terminal(&self) -> bool {
+        matches!(self, Self::RendererInstallTerminal(_))
+    }
 }
 
 pub type AppResult<T> = Result<T, AppError>;

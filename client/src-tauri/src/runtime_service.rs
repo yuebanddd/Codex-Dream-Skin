@@ -4,7 +4,7 @@ use crate::codex_process::CodexInstall;
 use crate::error::{AppError, AppResult};
 use crate::installed_store::InstalledStore;
 use crate::models::{InstalledSkin, RuntimeDiagnostics, RuntimeStatus};
-use crate::renderer_payload::build_payload;
+use crate::renderer_payload::{build_payload, RendererPayload};
 use crate::runtime_log::RuntimeLog;
 use chrono::Utc;
 use reqwest::Client;
@@ -48,7 +48,7 @@ struct RuntimeInner {
     child: Option<Child>,
     cancel: Option<watch::Sender<bool>>,
     watcher: Option<JoinHandle<()>>,
-    payload: Option<String>,
+    payload: Option<RendererPayload>,
     generation: u64,
 }
 
@@ -187,9 +187,17 @@ impl RuntimeManager {
             );
             return Ok(());
         }
-        if let Err(error) =
-            cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
-                .await
+        let progress = |item: cdp::CdpProgress| {
+            self.record_log(item.level, item.event, item.message, item.data)
+        };
+        if let Err(error) = cdp::apply_to_verified_targets(
+            &self.http,
+            record.port,
+            &record.browser_id,
+            &payload,
+            Some(&progress),
+        )
+        .await
         {
             self.spawn_cdp_failure_snapshot(
                 "cdp_recovery_probe_failed",
@@ -236,10 +244,17 @@ impl RuntimeManager {
         self.record_log(
             "info",
             "payload_ready",
-            "Renderer payload validated",
+            "Renderer engine and staged theme data validated",
             json!({
-                "payloadBytes": payload.len(),
-                "payloadSha256": format!("{:x}", Sha256::digest(payload.as_bytes())),
+                "themeKey": payload.theme_key(),
+                "engineBytes": payload.engine().len(),
+                "engineSha256": format!("{:x}", Sha256::digest(payload.engine().as_bytes())),
+                "cssBytes": payload.css().len(),
+                "cssSha256": format!("{:x}", Sha256::digest(payload.css().as_bytes())),
+                "artBytes": payload.art().len(),
+                "artSha256": format!("{:x}", Sha256::digest(payload.art())),
+                "artMime": payload.art_mime(),
+                "stagedDataBytes": payload.data_bytes(),
             }),
         );
         {
@@ -307,11 +322,15 @@ impl RuntimeManager {
         }
 
         let (record, install, child) = if let Some((active, install)) = reuse {
+            let progress = |item: cdp::CdpProgress| {
+                self.record_log(item.level, item.event, item.message, item.data)
+            };
             let injection = match cdp::apply_to_verified_targets(
                 &self.http,
                 active.port,
                 &active.browser_id,
                 &payload,
+                Some(&progress),
             )
             .await
             {
@@ -349,8 +368,10 @@ impl RuntimeManager {
                     "browserSessionTargets": injection.browser_session_targets,
                     "initializedSessionTargets": injection.initialized_session_targets,
                     "uninitializedFallbackTargets": injection.uninitialized_fallback_targets,
-                    "chunkedTransferTargets": injection.chunked_transfer_targets,
+                    "stagedTransferTargets": injection.staged_transfer_targets,
                     "transferredChunks": injection.transferred_chunks,
+                    "transferredBytes": injection.transferred_bytes,
+                    "installElapsedMs": injection.install_elapsed_ms,
                 }),
             );
             (
@@ -556,8 +577,10 @@ impl RuntimeManager {
                     "browserSessionTargets": injection.browser_session_targets,
                     "initializedSessionTargets": injection.initialized_session_targets,
                     "uninitializedFallbackTargets": injection.uninitialized_fallback_targets,
-                    "chunkedTransferTargets": injection.chunked_transfer_targets,
+                    "stagedTransferTargets": injection.staged_transfer_targets,
                     "transferredChunks": injection.transferred_chunks,
+                    "transferredBytes": injection.transferred_bytes,
+                    "installElapsedMs": injection.install_elapsed_ms,
                 }),
             );
             record.browser_id = browser_id;
@@ -677,9 +700,17 @@ impl RuntimeManager {
         validate_saved_install(&install, &record)?;
         self.verify_endpoint_with_snapshot("cdp_resume_endpoint_failed", &install, &record)
             .await?;
-        if let Err(error) =
-            cdp::apply_to_verified_targets(&self.http, record.port, &record.browser_id, &payload)
-                .await
+        let progress = |item: cdp::CdpProgress| {
+            self.record_log(item.level, item.event, item.message, item.data)
+        };
+        if let Err(error) = cdp::apply_to_verified_targets(
+            &self.http,
+            record.port,
+            &record.browser_id,
+            &payload,
+            Some(&progress),
+        )
+        .await
         {
             let failure = error.to_string();
             self.spawn_cdp_failure_snapshot(
@@ -936,7 +967,7 @@ impl RuntimeManager {
         record: RuntimeRecord,
         install: CodexInstall,
         child: Option<Child>,
-        payload: String,
+        payload: RendererPayload,
     ) {
         let (cancel, mut cancelled) = watch::channel(false);
         let generation = {
@@ -982,13 +1013,24 @@ impl RuntimeManager {
                         let result = match install
                             .verify_listener_owner(record.port, record.activation_pid)
                         {
-                            Ok(true) => cdp::ensure_theme_on_verified_targets(
-                                &manager.http,
-                                record.port,
-                                &record.browser_id,
-                                &theme_key,
-                                &payload,
-                            ).await.map(|_| ()),
+                            Ok(true) => {
+                                let progress = |item: cdp::CdpProgress| {
+                                    manager.record_log(
+                                        item.level,
+                                        item.event,
+                                        item.message,
+                                        item.data,
+                                    )
+                                };
+                                cdp::ensure_theme_on_verified_targets(
+                                    &manager.http,
+                                    record.port,
+                                    &record.browser_id,
+                                    &theme_key,
+                                    &payload,
+                                    Some(&progress),
+                                ).await.map(|_| ())
+                            },
                             Ok(false) => Err(AppError::Runtime(
                                 "CDP 监听进程不再属于已验证的 Codex".into(),
                             )),
@@ -1007,22 +1049,33 @@ impl RuntimeManager {
                         } else {
                             failures = failures.saturating_add(1);
                             let error = result.expect_err("failed watcher check must contain error");
+                            let terminal_install = error.is_renderer_install_terminal();
                             if failures == 1 {
                                 manager.record_log(
-                                    "warn",
-                                    "watcher_check_failed",
+                                    if terminal_install { "error" } else { "warn" },
+                                    if terminal_install {
+                                        "watcher_install_terminal"
+                                    } else {
+                                        "watcher_check_failed"
+                                    },
                                     error.to_string(),
                                     json!({
                                         "port": record.port,
                                         "browserId": record.browser_id,
                                         "consecutiveFailures": failures,
+                                        "retrySuppressed": terminal_install,
                                     }),
                                 );
                             }
-                            if failures >= 3 {
+                            if terminal_install || failures >= 3 {
                                 let failure = error.to_string();
                                 manager
-                                    .mark_watcher_error(generation, &record, &failure)
+                                    .mark_watcher_error(
+                                        generation,
+                                        &record,
+                                        &failure,
+                                        terminal_install,
+                                    )
                                     .await;
                                 manager
                                     .spawn_cdp_failure_snapshot(
@@ -1062,17 +1115,26 @@ impl RuntimeManager {
         }
     }
 
-    async fn mark_watcher_error(&self, generation: u64, record: &RuntimeRecord, failure: &str) {
-        self.record_log("error", "watcher_stopped", failure, record_log_data(record));
+    async fn mark_watcher_error(
+        &self,
+        generation: u64,
+        record: &RuntimeRecord,
+        failure: &str,
+        terminal_install: bool,
+    ) {
+        let mut data = record_log_data(record);
+        data["retrySuppressed"] = Value::Bool(terminal_install);
+        self.record_log("error", "watcher_stopped", failure, data);
         let mut inner = self.inner.lock().await;
         if inner.generation == generation {
             inner.cancel = None;
             inner.watcher = None;
-            inner.status = status_for_record(
-                "error",
-                record,
-                "CDP 会话连续失联；为防止端口被其他进程复用，已停止重注入",
-            );
+            let message = if terminal_install {
+                "主题安装已排队但渲染器失去响应；为避免重复注入，已停止重试"
+            } else {
+                "CDP 会话连续失联；为防止端口被其他进程复用，已停止重注入"
+            };
+            inner.status = status_for_record("error", record, message);
         }
     }
 
@@ -1369,7 +1431,7 @@ async fn wait_until_ready_and_apply(
     manager: &Arc<RuntimeManager>,
     install: &CodexInstall,
     port: u16,
-    payload: &str,
+    payload: &RendererPayload,
 ) -> AppResult<(String, cdp::CdpApplyOutcome)> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_error = "Codex 尚未开放 CDP".to_string();
@@ -1420,8 +1482,17 @@ async fn wait_until_ready_and_apply(
                     snapshot_browser_id = Some(identity.id.clone());
                 }
                 last_browser_id = Some(identity.id.clone());
-                match cdp::apply_to_verified_targets(&manager.http, port, &identity.id, payload)
-                    .await
+                let progress = |item: cdp::CdpProgress| {
+                    manager.record_log(item.level, item.event, item.message, item.data)
+                };
+                match cdp::apply_to_verified_targets(
+                    &manager.http,
+                    port,
+                    &identity.id,
+                    payload,
+                    Some(&progress),
+                )
+                .await
                 {
                     Ok(outcome) if outcome.applied_targets > 0 => {
                         if let Some(snapshot) = pending_snapshot.take() {
@@ -1430,6 +1501,31 @@ async fn wait_until_ready_and_apply(
                         return Ok((identity.id, outcome));
                     }
                     Ok(_) => last_error = "Codex 渲染页尚未完成文档初始化".into(),
+                    Err(error) if error.is_renderer_install_terminal() => {
+                        if let Some(snapshot) = pending_snapshot.take() {
+                            snapshot.abort();
+                        }
+                        let failure = error.to_string();
+                        manager.record_log(
+                            "error",
+                            "cdp_theme_install_terminal",
+                            failure.clone(),
+                            json!({
+                                "port": port,
+                                "browserId": identity.id,
+                                "retrySuppressed": true,
+                            }),
+                        );
+                        manager.spawn_cdp_failure_snapshot(
+                            "cdp_theme_install_terminal_snapshot",
+                            failure,
+                            install.clone(),
+                            port,
+                            install.activation_pid,
+                            Some(identity.id),
+                        );
+                        return Err(error);
+                    }
                     Err(error) => last_error = error.to_string(),
                 }
             }
