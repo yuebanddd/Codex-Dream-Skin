@@ -1305,6 +1305,7 @@ pub async fn ensure_theme_on_verified_targets(
     let health = guarded_expression(&theme_health_expression(theme_key)?);
     let mut healthy = 0;
     let mut presentable = 0;
+    let mut hidden_codex = 0;
     let mut target_transition = false;
     let mut last_error = None;
     for target in targets {
@@ -1324,7 +1325,10 @@ pub async fn ensure_theme_on_verified_targets(
             {
                 presentable += 1;
             }
-            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => continue,
+            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
+                hidden_codex += 1;
+                continue;
+            }
             Ok(_) => {
                 last_error = Some("页面尚未达到安全可注入状态".to_string());
                 continue;
@@ -1367,8 +1371,14 @@ pub async fn ensure_theme_on_verified_targets(
             Err(error) => last_error = Some(error.to_string()),
         }
     }
-    if presentable == 0 || (healthy == 0 && target_transition) {
+    if watcher_wait_is_safe(presentable, hidden_codex, healthy, target_transition) {
         return Ok(0);
+    }
+    if presentable == 0 {
+        return Err(AppError::Runtime(format!(
+            "没有观察到可见或隐藏的 Codex 主题渲染页：{}",
+            last_error.unwrap_or_else(|| "目标列表为空".into())
+        )));
     }
     if healthy == 0 {
         return Err(AppError::Runtime(format!(
@@ -1937,6 +1947,16 @@ fn guarded_result_is_presentable(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
+fn watcher_wait_is_safe(
+    presentable: usize,
+    hidden_codex: usize,
+    healthy: usize,
+    target_transition: bool,
+) -> bool {
+    (presentable == 0 && hidden_codex > 0)
+        || (presentable > 0 && healthy == 0 && target_transition)
+}
+
 fn renderer_probe_score(value: &Value) -> u64 {
     let focused = value
         .pointer("/presentation/hasFocus")
@@ -2275,6 +2295,15 @@ mod tests {
             "document": { "navigationEpoch": 43 },
         });
         assert_eq!(terminal_retry_reason_for_probe(Some(42), &unverified), None);
+    }
+
+    #[test]
+    fn watcher_waits_only_for_observed_hidden_or_transitioning_renderers() {
+        assert!(!watcher_wait_is_safe(0, 0, 0, false));
+        assert!(watcher_wait_is_safe(0, 1, 0, false));
+        assert!(watcher_wait_is_safe(1, 0, 0, true));
+        assert!(!watcher_wait_is_safe(1, 0, 0, false));
+        assert!(!watcher_wait_is_safe(1, 0, 1, true));
     }
 
     #[test]
