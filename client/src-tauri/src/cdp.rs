@@ -1435,14 +1435,9 @@ async fn install_theme_to_target(
     let direct_error = match install_theme_direct(target, port, payload, progress).await {
         Ok(installation) => return Ok(installation),
         Err(error) if !error.retry_safe => {
-            if let Some(reason) = terminal_retry_reason(
-                client,
-                target,
-                port,
-                browser_id,
-                error.navigation_epoch,
-            )
-            .await
+            if let Some(reason) =
+                terminal_retry_reason(client, target, port, browser_id, error.navigation_epoch)
+                    .await
             {
                 emit_progress(
                     progress,
@@ -2279,10 +2274,7 @@ mod tests {
             "codex": false,
             "document": { "navigationEpoch": 43 },
         });
-        assert_eq!(
-            terminal_retry_reason_for_probe(Some(42), &unverified),
-            None
-        );
+        assert_eq!(terminal_retry_reason_for_probe(Some(42), &unverified), None);
     }
 
     #[test]
