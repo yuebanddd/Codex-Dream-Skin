@@ -212,6 +212,7 @@ struct ThemeSessionInstallation {
 struct CdpAttemptError {
     error: AppError,
     retry_safe: bool,
+    navigation_epoch: Option<u64>,
 }
 
 impl CdpAttemptError {
@@ -219,6 +220,7 @@ impl CdpAttemptError {
         Self {
             error,
             retry_safe: true,
+            navigation_epoch: None,
         }
     }
 
@@ -230,7 +232,13 @@ impl CdpAttemptError {
         Self {
             error,
             retry_safe: false,
+            navigation_epoch: None,
         }
+    }
+
+    fn with_navigation_epoch(mut self, navigation_epoch: Option<u64>) -> Self {
+        self.navigation_epoch = navigation_epoch;
+        self
     }
 }
 
@@ -1427,7 +1435,15 @@ async fn install_theme_to_target(
     let direct_error = match install_theme_direct(target, port, payload, progress).await {
         Ok(installation) => return Ok(installation),
         Err(error) if !error.retry_safe => {
-            if let Some(reason) = terminal_retry_reason(client, target, port, browser_id).await {
+            if let Some(reason) = terminal_retry_reason(
+                client,
+                target,
+                port,
+                browser_id,
+                error.navigation_epoch,
+            )
+            .await
+            {
                 emit_progress(
                     progress,
                     "warn",
@@ -1452,7 +1468,15 @@ async fn install_theme_to_target(
     match install_theme_attached(client, target, port, browser_id, payload, progress).await {
         Ok(installation) => Ok(installation),
         Err(browser_error) if !browser_error.retry_safe => {
-            if let Some(reason) = terminal_retry_reason(client, target, port, browser_id).await {
+            if let Some(reason) = terminal_retry_reason(
+                client,
+                target,
+                port,
+                browser_id,
+                browser_error.navigation_epoch,
+            )
+            .await
+            {
                 emit_progress(
                     progress,
                     "warn",
@@ -1485,6 +1509,7 @@ async fn terminal_retry_reason(
     target: &CdpTarget,
     port: u16,
     browser_id: &str,
+    navigation_epoch: Option<u64>,
 ) -> Option<&'static str> {
     let targets = verified_targets(client, port, browser_id).await.ok()?;
     let Some(current) = targets.into_iter().find(|item| item.id == target.id) else {
@@ -1505,7 +1530,19 @@ async fn terminal_retry_reason(
     .await
     .ok()?
     .ok()?;
-    probe_is_codex(Some(&fresh_probe)).then_some("freshSessionResponsive")
+    terminal_retry_reason_for_probe(navigation_epoch, &fresh_probe)
+}
+
+fn terminal_retry_reason_for_probe(
+    navigation_epoch: Option<u64>,
+    probe: &Value,
+) -> Option<&'static str> {
+    let current_epoch = renderer_navigation_epoch(probe);
+    (probe_is_codex(Some(probe))
+        && navigation_epoch.is_some()
+        && current_epoch.is_some()
+        && current_epoch != navigation_epoch)
+        .then_some("targetNavigated")
 }
 
 async fn install_theme_direct(
@@ -1568,13 +1605,15 @@ async fn install_theme_direct_attempt(
             .await
             .map_err(CdpAttemptError::retry_safe)?;
     }
-    session
+    let stable_probe = session
         .verify_stable_renderer(None)
         .await
         .map_err(CdpAttemptError::retry_safe)?;
+    let navigation_epoch = renderer_navigation_epoch(&stable_probe);
     let result = session
         .install_theme(None, &target.id, payload, progress)
-        .await;
+        .await
+        .map_err(|error| error.with_navigation_epoch(navigation_epoch));
     let should_close = match &result {
         Ok(_) => true,
         Err(error) => error.retry_safe,
@@ -1673,13 +1712,15 @@ async fn install_theme_attached_attempt(
             .await
             .map_err(CdpAttemptError::retry_safe)?;
     }
-    browser
+    let stable_probe = browser
         .verify_stable_renderer(Some(session_id.as_str()))
         .await
         .map_err(CdpAttemptError::retry_safe)?;
+    let navigation_epoch = renderer_navigation_epoch(&stable_probe);
     let result = browser
         .install_theme(Some(session_id.as_str()), &target.id, payload, progress)
-        .await;
+        .await
+        .map_err(|error| error.with_navigation_epoch(navigation_epoch));
     let should_close = match &result {
         Ok(_) => true,
         Err(error) => error.retry_safe,
@@ -2211,6 +2252,37 @@ mod tests {
         let error = AppError::RendererTargetTransition("target replaced".into());
         assert!(error.is_renderer_target_transition());
         assert!(!error.is_renderer_install_terminal());
+    }
+
+    #[test]
+    fn terminal_retry_requires_an_observed_navigation_epoch_change() {
+        let same_document = json!({
+            "codex": true,
+            "document": { "navigationEpoch": 42 },
+        });
+        assert_eq!(
+            terminal_retry_reason_for_probe(Some(42), &same_document),
+            None
+        );
+        assert_eq!(terminal_retry_reason_for_probe(None, &same_document), None);
+
+        let navigated = json!({
+            "codex": true,
+            "document": { "navigationEpoch": 43 },
+        });
+        assert_eq!(
+            terminal_retry_reason_for_probe(Some(42), &navigated),
+            Some("targetNavigated")
+        );
+
+        let unverified = json!({
+            "codex": false,
+            "document": { "navigationEpoch": 43 },
+        });
+        assert_eq!(
+            terminal_retry_reason_for_probe(Some(42), &unverified),
+            None
+        );
     }
 
     #[test]
