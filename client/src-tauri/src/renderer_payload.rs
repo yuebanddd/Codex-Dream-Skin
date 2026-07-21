@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 const IMAGE_LIMIT: u64 = 32 * 1024 * 1024;
 const CSS_LIMIT: u64 = 1024 * 1024;
+pub(crate) const RENDERER_ENGINE_VERSION: u64 = 2;
+pub(crate) const RENDERER_RUNTIME_VERSION: u64 = 4;
 
 #[derive(Debug, Clone)]
 pub struct RendererPayload {
@@ -105,6 +107,8 @@ html.lumadrobe-theme .composer-surface-chrome {
 }
 "#;
 
+const PAINT_PROBE_CSS: &str = "html.lumadrobe-theme { --lumadrobe-paint-probe: 1 !important; }";
+
 pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     let background = read_verified_asset(
         installed,
@@ -121,7 +125,7 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     } else {
         String::new()
     };
-    let css = format!("{BASE_CSS}\n{custom_css}");
+    let css = format!("{BASE_CSS}\n{custom_css}\n{PAINT_PROBE_CSS}\n");
     let theme_key = format!(
         "{}:{}@{}",
         installed.source_id, installed.skin_id, installed.version
@@ -134,10 +138,12 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     });
     let theme_json = serde_json::to_string(&theme)?;
 
+    let engine_version = RENDERER_ENGINE_VERSION;
+    let runtime_version = RENDERER_RUNTIME_VERSION;
     let engine = format!(
         r#"(() => {{
   const ENGINE_KEY = "__LUMADROBE_ENGINE__";
-  const ENGINE_VERSION = 1;
+  const ENGINE_VERSION = {engine_version};
   const currentEngine = window[ENGINE_KEY];
   if (currentEngine?.engineVersion === ENGINE_VERSION &&
       typeof currentEngine?.install === "function") {{
@@ -145,7 +151,7 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
   }}
   const install = (theme, cssText, artBlob) => {{
   const STATE_KEY = "__LUMADROBE_RUNTIME__";
-  const RUNTIME_VERSION = 3;
+  const RUNTIME_VERSION = {runtime_version};
   const STYLE_ID = "lumadrobe-theme-style";
   const CHROME_ID = "codex-dream-skin-chrome";
   const ROOT_CLASSES = ["lumadrobe-theme", "codex-dream-skin"];
@@ -366,6 +372,19 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
   const status = () => {{
     const root = document.documentElement;
     const style = document.getElementById(STYLE_ID);
+    const viewportWidth = Math.max(0, Math.round(window.innerWidth || 0));
+    const viewportHeight = Math.max(0, Math.round(window.innerHeight || 0));
+    const surfaceReady = Boolean(document.querySelector(
+      'main,[role="main"],aside.app-shell-left-panel,.composer-surface-chrome'
+    ));
+    let paintVerified = false;
+    try {{
+      paintVerified = getComputedStyle(root)
+        .getPropertyValue("--lumadrobe-paint-probe").trim() === "1";
+    }} catch {{}}
+    const visibilityState = document.visibilityState || "unknown";
+    const presentable = visibilityState === "visible" && viewportWidth >= 320 &&
+      viewportHeight >= 240 && surfaceReady;
     return {{
       installed: Boolean(window[STATE_KEY]?.runtimeVersion === RUNTIME_VERSION &&
         window[STATE_KEY]?.themeKey === theme.key),
@@ -373,6 +392,16 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
       rootTagged: Boolean(root && ROOT_CLASSES.every((name) => root.classList.contains(name))),
       artAttached: Boolean(root && ART_PROPERTIES.every((name) => root.style.getPropertyValue(name))),
       chromeAttached: chromeIsReady(),
+      paintVerified,
+      presentable,
+      visibilityState,
+      hasFocus: document.hasFocus(),
+      viewportWidth,
+      viewportHeight,
+      surfaceReady,
+      navigationEpoch: Number.isFinite(performance.timeOrigin)
+        ? Math.round(performance.timeOrigin)
+        : null,
     }};
   }};
 
@@ -553,7 +582,15 @@ mod tests {
         let payload = build_payload(&skin).unwrap();
         assert!(payload.engine().contains("__LUMADROBE_RUNTIME__"));
         assert!(payload.engine().contains("__LUMADROBE_ENGINE__"));
+        assert_eq!(RENDERER_ENGINE_VERSION, 2);
+        assert_eq!(RENDERER_RUNTIME_VERSION, 4);
+        assert!(payload.engine().contains("const ENGINE_VERSION = 2;"));
+        assert!(payload.engine().contains("const RUNTIME_VERSION = 4;"));
         assert!(payload.engine().contains("runtimeVersion: RUNTIME_VERSION"));
+        assert!(payload
+            .engine()
+            .contains("previous?.runtimeVersion === RUNTIME_VERSION"));
+        assert!(payload.engine().contains("previous?.cleanup?.()"));
         assert!(!payload.engine().contains("data:image/png;base64"));
         assert_eq!(payload.theme_key(), "source:night@1.0.0");
         assert!(payload.theme_json().contains("source:night@1.0.0"));
@@ -567,6 +604,9 @@ mod tests {
         assert!(payload.engine().contains("rootTagged"));
         assert!(payload.engine().contains("artAttached"));
         assert!(payload.engine().contains("chromeAttached"));
+        assert!(payload.engine().contains("paintVerified"));
+        assert!(payload.engine().contains("presentable"));
+        assert!(payload.engine().contains("--lumadrobe-paint-probe"));
         assert!(payload.engine().contains("codex-dream-skin-chrome"));
         assert!(payload.engine().contains("chromeIsReady"));
         let appearance = payload

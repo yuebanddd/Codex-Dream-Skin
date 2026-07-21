@@ -1,4 +1,4 @@
-use crate::renderer_payload::RendererPayload;
+use crate::renderer_payload::{RendererPayload, RENDERER_ENGINE_VERSION};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DATA_CHUNK_BYTES: usize = 72 * 1024;
 const TRANSFER_KEY_PREFIX: &str = "__LUMADROBE_THEME_TRANSFER__";
 const ENGINE_KEY: &str = "__LUMADROBE_ENGINE__";
-const ENGINE_VERSION: u32 = 1;
 const TRANSFER_TTL_MS: u64 = 120_000;
 static TRANSFER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -310,7 +309,7 @@ impl ThemeTransferPlan {
         let key = json_string(&self.storage_key);
         let token = json_string(&self.token);
         let engine_key = json_string(ENGINE_KEY);
-        let engine_version = ENGINE_VERSION;
+        let engine_version = RENDERER_ENGINE_VERSION;
         let ttl_ms = TRANSFER_TTL_MS;
         format!(
             r#"(() => {{
@@ -565,6 +564,7 @@ mod tests {
         assert!(start.contains("TextDecoder(\"utf-8\", { fatal: true })"));
         assert!(start.contains("validatingImage"));
         assert!(start.contains("engine.install"));
+        assert!(start.contains("engine?.engineVersion !== 2"));
         assert!(status.contains("transfer.phase"));
         assert!(start.len() < 32 * 1024);
         assert!(status.len() < 8 * 1024);
