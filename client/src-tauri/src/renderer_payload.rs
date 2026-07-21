@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 const IMAGE_LIMIT: u64 = 32 * 1024 * 1024;
 const CSS_LIMIT: u64 = 1024 * 1024;
+pub(crate) const RENDERER_ENGINE_VERSION: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct RendererPayload {
@@ -136,10 +137,11 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     });
     let theme_json = serde_json::to_string(&theme)?;
 
+    let engine_version = RENDERER_ENGINE_VERSION;
     let engine = format!(
         r#"(() => {{
   const ENGINE_KEY = "__LUMADROBE_ENGINE__";
-  const ENGINE_VERSION = 1;
+  const ENGINE_VERSION = {engine_version};
   const currentEngine = window[ENGINE_KEY];
   if (currentEngine?.engineVersion === ENGINE_VERSION &&
       typeof currentEngine?.install === "function") {{
@@ -578,6 +580,8 @@ mod tests {
         let payload = build_payload(&skin).unwrap();
         assert!(payload.engine().contains("__LUMADROBE_RUNTIME__"));
         assert!(payload.engine().contains("__LUMADROBE_ENGINE__"));
+        assert_eq!(RENDERER_ENGINE_VERSION, 2);
+        assert!(payload.engine().contains("const ENGINE_VERSION = 2;"));
         assert!(payload.engine().contains("runtimeVersion: RUNTIME_VERSION"));
         assert!(!payload.engine().contains("data:image/png;base64"));
         assert_eq!(payload.theme_key(), "source:night@1.0.0");

@@ -1,6 +1,6 @@
 use crate::cdp_transfer::ThemeTransferPlan;
 use crate::error::{AppError, AppResult};
-use crate::renderer_payload::RendererPayload;
+use crate::renderer_payload::{RendererPayload, RENDERER_ENGINE_VERSION};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -405,7 +405,8 @@ impl CdpSession {
                 )))
             })?;
         if engine.get("ready").and_then(Value::as_bool) != Some(true)
-            || engine.get("engineVersion").and_then(Value::as_u64) != Some(1)
+            || engine.get("engineVersion").and_then(Value::as_u64)
+                != Some(RENDERER_ENGINE_VERSION)
         {
             return Err(CdpAttemptError::retry_safe(AppError::Runtime(
                 "CDP 主题引擎未返回有效确认".into(),
@@ -1445,9 +1446,15 @@ async fn install_theme_to_target(
     let direct_error = match install_theme_direct(target, port, payload, progress).await {
         Ok(installation) => return Ok(installation),
         Err(error) if !error.retry_safe => {
-            if let Some(reason) =
-                terminal_retry_reason(client, target, port, browser_id, error.navigation_epoch)
-                    .await
+            if let Some(reason) = terminal_retry_reason(
+                client,
+                target,
+                port,
+                browser_id,
+                error.navigation_epoch,
+                CdpTransport::DirectPage,
+            )
+            .await
             {
                 emit_progress(
                     progress,
@@ -1479,6 +1486,7 @@ async fn install_theme_to_target(
                 port,
                 browser_id,
                 browser_error.navigation_epoch,
+                CdpTransport::BrowserSession,
             )
             .await
             {
@@ -1515,26 +1523,20 @@ async fn terminal_retry_reason(
     port: u16,
     browser_id: &str,
     navigation_epoch: Option<u64>,
+    transport: CdpTransport,
 ) -> Option<&'static str> {
     let targets = verified_targets(client, port, browser_id).await.ok()?;
     let Some(current) = targets.into_iter().find(|item| item.id == target.id) else {
         return Some("targetReplaced");
     };
-    let fresh_probe = timeout(Duration::from_secs(3), async {
-        let mut session = CdpSession::connect_page(&current, port).await?;
-        let initialized = session.initialize_renderer(None).await;
-        if initialized.is_err() {
-            session = CdpSession::connect_page(&current, port).await?;
+    let evaluation = match transport {
+        CdpTransport::DirectPage => evaluate_many_direct(&current, port, &[PROBE_EXPRESSION]).await,
+        CdpTransport::BrowserSession => {
+            evaluate_many_attached(client, &current, port, browser_id, &[PROBE_EXPRESSION]).await
         }
-        let probe = session
-            .evaluate(None, PROBE_EXPRESSION, Duration::from_secs(2))
-            .await?;
-        session.close().await;
-        Ok::<Value, AppError>(probe)
-    })
-    .await
-    .ok()?
+    }
     .ok()?;
+    let fresh_probe = evaluation.values.into_iter().next()?;
     terminal_retry_reason_for_probe(navigation_epoch, &fresh_probe)
 }
 
@@ -1953,8 +1955,7 @@ fn watcher_wait_is_safe(
     healthy: usize,
     target_transition: bool,
 ) -> bool {
-    (presentable == 0 && hidden_codex > 0)
-        || (presentable > 0 && healthy == 0 && target_transition)
+    (presentable == 0 && hidden_codex > 0) || (presentable > 0 && healthy == 0 && target_transition)
 }
 
 fn renderer_probe_score(value: &Value) -> u64 {
