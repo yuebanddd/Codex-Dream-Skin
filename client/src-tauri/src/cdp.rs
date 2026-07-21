@@ -164,6 +164,7 @@ struct ThemeInstallation {
     value: Value,
     transport: CdpTransport,
     session_mode: RendererSessionMode,
+    theme_chunks: usize,
     css_chunks: usize,
     art_chunks: usize,
     data_bytes: usize,
@@ -173,6 +174,7 @@ struct ThemeInstallation {
 
 struct ThemeSessionInstallation {
     value: Value,
+    theme_chunks: usize,
     css_chunks: usize,
     art_chunks: usize,
     data_bytes: usize,
@@ -320,10 +322,13 @@ impl CdpSession {
                 "endpoint": self.endpoint,
                 "themeKey": payload.theme_key(),
                 "engineBytes": payload.engine().len(),
+                "themeBytes": plan.theme_bytes(),
+                "themeSha256": plan.theme_sha256(),
                 "cssBytes": plan.css_bytes(),
                 "cssSha256": plan.css_sha256(),
                 "artBytes": plan.art_bytes(),
                 "artSha256": plan.art_sha256(),
+                "themeChunks": plan.theme_chunk_count(),
                 "cssChunks": plan.css_chunk_count(),
                 "artChunks": plan.art_chunk_count(),
             }),
@@ -376,6 +381,53 @@ impl CdpSession {
                 "CDP 主题数据通道初始化未被渲染器确认".into(),
             )));
         }
+
+        for index in 0..plan.theme_chunk_count() {
+            let expression = plan.theme_chunk_expression(index);
+            let acknowledgement = match self
+                .evaluate(session_id, &expression, TRANSFER_COMMAND_TIMEOUT)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    self.cleanup_theme_transfer(session_id, &plan).await;
+                    return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                        "CDP 主题元数据分片传输失败：分片 {}/{}：{error}",
+                        index + 1,
+                        plan.theme_chunk_count(),
+                    ))));
+                }
+            };
+            let expected_bytes = plan.theme_received_bytes_after(index);
+            if !theme_data_chunk_acknowledged(
+                &acknowledgement,
+                plan.token(),
+                "themeReceiving",
+                index + 1,
+                expected_bytes,
+            ) {
+                self.cleanup_theme_transfer(session_id, &plan).await;
+                return Err(CdpAttemptError::retry_safe(AppError::Runtime(format!(
+                    "CDP 主题元数据分片确认无效：分片 {}/{}",
+                    index + 1,
+                    plan.theme_chunk_count(),
+                ))));
+            }
+        }
+        emit_progress(
+            progress,
+            "info",
+            "cdp_theme_metadata_transferred",
+            "Renderer theme metadata transferred",
+            json!({
+                "targetId": target_id,
+                "endpoint": self.endpoint,
+                "themeBytes": plan.theme_bytes(),
+                "themeSha256": plan.theme_sha256(),
+                "themeChunks": plan.theme_chunk_count(),
+                "elapsedMs": elapsed_ms(started),
+            }),
+        );
 
         for index in 0..plan.css_chunk_count() {
             let expression = plan.css_chunk_expression(index);
@@ -521,6 +573,7 @@ impl CdpSession {
             json!({
                 "targetId": target_id,
                 "endpoint": self.endpoint,
+                "themeChunks": plan.theme_chunk_count(),
                 "cssChunks": plan.css_chunk_count(),
                 "artChunks": plan.art_chunk_count(),
                 "transferredBytes": payload.data_bytes(),
@@ -614,6 +667,7 @@ impl CdpSession {
                             "endpoint": self.endpoint,
                             "elapsedMs": elapsed_ms,
                             "rendererTimings": renderer_timings,
+                            "themeChunks": plan.theme_chunk_count(),
                             "cssChunks": plan.css_chunk_count(),
                             "artChunks": plan.art_chunk_count(),
                             "transferredBytes": payload.data_bytes(),
@@ -621,6 +675,7 @@ impl CdpSession {
                     );
                     return Ok(ThemeSessionInstallation {
                         value,
+                        theme_chunks: plan.theme_chunk_count(),
                         css_chunks: plan.css_chunk_count(),
                         art_chunks: plan.art_chunk_count(),
                         data_bytes: payload.data_bytes(),
@@ -1032,6 +1087,7 @@ pub async fn apply_to_verified_targets(
                 }
                 staged_transfer_targets += 1;
                 transferred_chunks = transferred_chunks
+                    .saturating_add(installation.theme_chunks)
                     .saturating_add(installation.css_chunks)
                     .saturating_add(installation.art_chunks);
                 transferred_bytes = transferred_bytes.saturating_add(installation.data_bytes);
@@ -1045,6 +1101,7 @@ pub async fn apply_to_verified_targets(
                         "targetId": target.id,
                         "transport": installation.transport.as_str(),
                         "sessionMode": installation.session_mode.as_str(),
+                        "themeChunks": installation.theme_chunks,
                         "cssChunks": installation.css_chunks,
                         "artChunks": installation.art_chunks,
                         "transferredBytes": installation.data_bytes,
@@ -1208,6 +1265,7 @@ async fn install_theme_direct(
                     value: installation.value,
                     transport: CdpTransport::DirectPage,
                     session_mode: RendererSessionMode::Initialized,
+                    theme_chunks: installation.theme_chunks,
                     css_chunks: installation.css_chunks,
                     art_chunks: installation.art_chunks,
                     data_bytes: installation.data_bytes,
@@ -1223,6 +1281,7 @@ async fn install_theme_direct(
             value: installation.value,
             transport: CdpTransport::DirectPage,
             session_mode: RendererSessionMode::UninitializedFallback,
+            theme_chunks: installation.theme_chunks,
             css_chunks: installation.css_chunks,
             art_chunks: installation.art_chunks,
             data_bytes: installation.data_bytes,
@@ -1293,6 +1352,7 @@ async fn install_theme_attached(
                 value: installation.value,
                 transport: CdpTransport::BrowserSession,
                 session_mode: RendererSessionMode::Initialized,
+                theme_chunks: installation.theme_chunks,
                 css_chunks: installation.css_chunks,
                 art_chunks: installation.art_chunks,
                 data_bytes: installation.data_bytes,
@@ -1312,6 +1372,7 @@ async fn install_theme_attached(
             value: installation.value,
             transport: CdpTransport::BrowserSession,
             session_mode: RendererSessionMode::UninitializedFallback,
+            theme_chunks: installation.theme_chunks,
             css_chunks: installation.css_chunks,
             art_chunks: installation.art_chunks,
             data_bytes: installation.data_bytes,

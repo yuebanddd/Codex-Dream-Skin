@@ -48,12 +48,23 @@ impl RendererPayload {
 
     #[cfg(test)]
     pub(crate) fn test_fixture(theme_key: &str, css: &str, art_mime: &str, art: Vec<u8>) -> Self {
+        Self::test_fixture_with_name(theme_key, "Fixture", css, art_mime, art)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture_with_name(
+        theme_key: &str,
+        name: &str,
+        css: &str,
+        art_mime: &str,
+        art: Vec<u8>,
+    ) -> Self {
         Self {
             theme_key: theme_key.into(),
             theme_json: serde_json::to_string(&json!({
                 "key": theme_key,
                 "id": "fixture",
-                "name": "Fixture",
+                "name": name,
                 "version": "1.0.0",
             }))
             .expect("fixture theme is serializable"),
