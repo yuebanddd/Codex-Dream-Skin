@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, timeout_at, Instant};
@@ -23,6 +24,7 @@ const INSTALL_START_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTALL_POLL_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTALL_DEADLINE: Duration = Duration::from_secs(25);
 const INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(125);
+const TARGET_STABILITY_DELAY: Duration = Duration::from_millis(300);
 const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
 const DIAGNOSTIC_PROBE_LIMIT: usize = 4;
@@ -50,6 +52,15 @@ const PROBE_EXPRESSION: &str = r#"(() => {
   const landmarks = Array.from(document.querySelectorAll(
     'main,aside,nav,header,[role="main"],[role="navigation"],[data-testid]'
   )).slice(0, 24).map(describe);
+  const elementCount = document.getElementsByTagName('*').length;
+  const viewportWidth = Math.max(0, Math.round(window.innerWidth || 0));
+  const viewportHeight = Math.max(0, Math.round(window.innerHeight || 0));
+  const surfaceReady = markers.shell || markers.sidebar || markers.composer || markers.main ||
+    Boolean(document.querySelector('main'));
+  const visibilityState = document.visibilityState || 'unknown';
+  const presentable = security.documentReady && document.readyState === 'complete' &&
+    visibilityState === 'visible' && viewportWidth >= 320 && viewportHeight >= 240 &&
+    surfaceReady && elementCount >= 16;
   return {
     // Rust has already verified the signed Codex process, listener owner, browser
     // identity, app:// target URL and loopback WebSocket path. Keep only the
@@ -64,9 +75,18 @@ const PROBE_EXPRESSION: &str = r#"(() => {
       hasDocumentElement: Boolean(document.documentElement),
       hasHead: Boolean(document.head),
       hasBody: Boolean(document.body),
-      elementCount: document.getElementsByTagName('*').length,
+      elementCount,
+      navigationEpoch: Number.isFinite(performance.timeOrigin) ? Math.round(performance.timeOrigin) : null,
       root: document.documentElement ? describe(document.documentElement) : null,
       body: document.body ? describe(document.body) : null,
+    },
+    presentation: {
+      presentable,
+      visibilityState,
+      hasFocus: document.hasFocus(),
+      viewportWidth,
+      viewportHeight,
+      surfaceReady,
     },
     markers,
     landmarks,
@@ -151,6 +171,13 @@ impl RendererSessionMode {
 
 struct CdpEvaluation {
     values: Vec<Value>,
+    transport: CdpTransport,
+    session_mode: RendererSessionMode,
+}
+
+struct RendererTargetObservation {
+    target: CdpTarget,
+    probe: Value,
     transport: CdpTransport,
     session_mode: RendererSessionMode,
 }
@@ -301,6 +328,33 @@ impl CdpSession {
             .pointer("/result/value")
             .cloned()
             .unwrap_or(Value::Null))
+    }
+
+    async fn verify_stable_renderer(&mut self, session_id: Option<&str>) -> AppResult<Value> {
+        let first = self
+            .evaluate(session_id, PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT)
+            .await?;
+        if !probe_is_codex(Some(&first)) || !renderer_probe_is_presentable(Some(&first)) {
+            return Err(AppError::Runtime(
+                "渲染目标当前不可见、布局未完成或不是 Codex 主界面".into(),
+            ));
+        }
+        let first_epoch = renderer_navigation_epoch(&first)
+            .ok_or_else(|| AppError::Runtime("渲染目标缺少导航生命周期标识".into()))?;
+        sleep(TARGET_STABILITY_DELAY).await;
+        let second = self
+            .evaluate(session_id, PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT)
+            .await?;
+        let second_epoch = renderer_navigation_epoch(&second);
+        if !probe_is_codex(Some(&second))
+            || !renderer_probe_is_presentable(Some(&second))
+            || second_epoch != Some(first_epoch)
+        {
+            return Err(AppError::Runtime(
+                "渲染目标在稳定性确认期间发生导航或失去可见性".into(),
+            ));
+        }
+        Ok(second)
     }
 
     async fn install_theme(
@@ -671,6 +725,7 @@ impl CdpSession {
                             "cssChunks": plan.css_chunk_count(),
                             "artChunks": plan.art_chunk_count(),
                             "transferredBytes": payload.data_bytes(),
+                            "presentation": renderer_presentation(&value),
                         }),
                     );
                     return Ok(ThemeSessionInstallation {
@@ -933,6 +988,7 @@ pub async fn verified_targets(
     // but retain initialRoute windows as fallback candidates because current
     // Codex builds can expose the responsive renderer under either target.
     targets.sort_by_key(target_priority);
+    deduplicate_targets_by_id(&mut targets);
     Ok(targets)
 }
 
@@ -1053,6 +1109,85 @@ async fn collect_diagnostic_snapshot(
     })
 }
 
+async fn select_presentable_targets(
+    client: &Client,
+    port: u16,
+    browser_id: &str,
+    progress: Option<CdpProgressSink<'_>>,
+) -> AppResult<Vec<CdpTarget>> {
+    let targets = verified_targets(client, port, browser_id).await?;
+    let total_targets = targets.len();
+    let mut observations = Vec::new();
+    let mut reports = Vec::with_capacity(total_targets);
+    let mut last_error = None;
+
+    for target in targets {
+        match evaluate_many(client, &target, port, browser_id, &[PROBE_EXPRESSION]).await {
+            Ok(evaluation) => {
+                let probe = evaluation.values.into_iter().next().unwrap_or(Value::Null);
+                reports.push(renderer_observation_report(
+                    &target,
+                    &probe,
+                    Some(evaluation.transport),
+                    Some(evaluation.session_mode),
+                    None,
+                ));
+                if probe_is_codex(Some(&probe)) && renderer_probe_is_presentable(Some(&probe)) {
+                    observations.push(RendererTargetObservation {
+                        target,
+                        probe,
+                        transport: evaluation.transport,
+                        session_mode: evaluation.session_mode,
+                    });
+                }
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                reports.push(renderer_observation_report(
+                    &target,
+                    &Value::Null,
+                    None,
+                    None,
+                    Some(error.to_string()),
+                ));
+            }
+        }
+    }
+
+    observations.sort_by(|left, right| {
+        renderer_probe_score(&right.probe)
+            .cmp(&renderer_probe_score(&left.probe))
+            .then_with(|| target_priority(&left.target).cmp(&target_priority(&right.target)))
+    });
+    let selected = observations.first().map(|item| item.target.id.clone());
+    let selected_transport = observations.first().map(|item| item.transport.as_str());
+    let selected_session_mode = observations.first().map(|item| item.session_mode.as_str());
+    if selected.is_some() {
+        emit_progress(
+            progress,
+            "info",
+            "cdp_renderer_selection",
+            "Visible Codex renderer selection completed",
+            json!({
+                "totalTargets": total_targets,
+                "presentableTargets": observations.len(),
+                "selectedTargetId": selected,
+                "selectedProbeTransport": selected_transport,
+                "selectedProbeSessionMode": selected_session_mode,
+                "targets": reports,
+            }),
+        );
+    }
+
+    let Some(selected) = observations.into_iter().next() else {
+        return Err(AppError::Runtime(format!(
+            "尚未发现可见且完成布局的 Codex 主渲染页：{}",
+            last_error.unwrap_or_else(|| "目标仍处于隐藏或启动状态".into())
+        )));
+    };
+    Ok(vec![selected.target])
+}
+
 pub async fn apply_to_verified_targets(
     client: &Client,
     port: u16,
@@ -1060,7 +1195,7 @@ pub async fn apply_to_verified_targets(
     payload: &RendererPayload,
     progress: Option<CdpProgressSink<'_>>,
 ) -> AppResult<CdpApplyOutcome> {
-    let targets = verified_targets(client, port, browser_id).await?;
+    let targets = select_presentable_targets(client, port, browser_id, progress).await?;
     let mut applied = 0;
     let mut direct_targets = 0;
     let mut browser_session_targets = 0;
@@ -1099,6 +1234,7 @@ pub async fn apply_to_verified_targets(
                     "Theme installed on a verified Codex renderer",
                     json!({
                         "targetId": target.id,
+                        "location": safe_target_location(&target.url),
                         "transport": installation.transport.as_str(),
                         "sessionMode": installation.session_mode.as_str(),
                         "themeChunks": installation.theme_chunks,
@@ -1107,10 +1243,25 @@ pub async fn apply_to_verified_targets(
                         "transferredBytes": installation.data_bytes,
                         "elapsedMs": installation.elapsed_ms,
                         "rendererTimings": installation.renderer_timings,
+                        "presentation": renderer_presentation(&installation.value),
                     }),
                 );
             }
-            Ok(_) => last_error = Some("主题样式未完成挂载".to_string()),
+            Ok(installation) => {
+                emit_progress(
+                    progress,
+                    "warn",
+                    "cdp_theme_visibility_failed",
+                    "Theme DOM mounted but visible paint verification failed",
+                    json!({
+                        "targetId": target.id,
+                        "location": safe_target_location(&target.url),
+                        "presentation": renderer_presentation(&installation.value),
+                        "retrySuppressed": false,
+                    }),
+                );
+                last_error = Some("主题 DOM 已挂载，但可见窗口或实际样式未通过验收".to_string());
+            }
             Err(error) if error.is_renderer_install_terminal() => return Err(error),
             Err(error) => last_error = Some(error.to_string()),
         }
@@ -1145,17 +1296,27 @@ pub async fn ensure_theme_on_verified_targets(
     let targets = verified_targets(client, port, browser_id).await?;
     let health = guarded_expression(&theme_health_expression(theme_key)?);
     let mut healthy = 0;
+    let mut presentable = 0;
+    let mut target_transition = false;
     let mut last_error = None;
     for target in targets {
         match evaluate_many(client, &target, port, browser_id, &[&health]).await {
             Ok(evaluation)
                 if probe_is_codex(evaluation.values.first())
+                    && guarded_result_is_presentable(evaluation.values.first())
                     && action_result_is_true(evaluation.values.first()) =>
             {
+                presentable += 1;
                 healthy += 1;
                 continue;
             }
-            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {}
+            Ok(evaluation)
+                if probe_is_codex(evaluation.values.first())
+                    && guarded_result_is_presentable(evaluation.values.first()) =>
+            {
+                presentable += 1;
+            }
+            Ok(evaluation) if probe_is_codex(evaluation.values.first()) => continue,
             Ok(_) => {
                 last_error = Some("页面尚未达到安全可注入状态".to_string());
                 continue;
@@ -1170,10 +1331,36 @@ pub async fn ensure_theme_on_verified_targets(
             Ok(installation) if theme_install_result_is_confirmed(&installation.value) => {
                 healthy += 1
             }
-            Ok(_) => last_error = Some("重注入后主题样式未完成挂载".to_string()),
-            Err(error) if error.is_renderer_install_terminal() => return Err(error),
+            Ok(installation) => {
+                emit_progress(
+                    progress,
+                    "warn",
+                    "cdp_theme_visibility_failed",
+                    "Theme DOM mounted but visible paint verification failed",
+                    json!({
+                        "targetId": target.id,
+                        "location": safe_target_location(&target.url),
+                        "presentation": renderer_presentation(&installation.value),
+                        "retrySuppressed": false,
+                    }),
+                );
+                last_error = Some("重注入后可见窗口或实际样式未通过验收".to_string());
+            }
+            Err(error) if error.is_renderer_install_terminal() && healthy == 0 => {
+                return Err(error)
+            }
+            Err(error) if error.is_renderer_install_terminal() => {
+                last_error = Some(error.to_string())
+            }
+            Err(error) if error.is_renderer_target_transition() => {
+                target_transition = true;
+                last_error = Some(error.to_string());
+            }
             Err(error) => last_error = Some(error.to_string()),
         }
+    }
+    if presentable == 0 || (healthy == 0 && target_transition) {
+        return Ok(0);
     }
     if healthy == 0 {
         return Err(AppError::Runtime(format!(
@@ -1239,17 +1426,86 @@ async fn install_theme_to_target(
 ) -> AppResult<ThemeInstallation> {
     let direct_error = match install_theme_direct(target, port, payload, progress).await {
         Ok(installation) => return Ok(installation),
-        Err(error) if !error.retry_safe => return Err(error.error),
+        Err(error) if !error.retry_safe => {
+            if let Some(reason) = terminal_retry_reason(client, target, port, browser_id).await {
+                emit_progress(
+                    progress,
+                    "warn",
+                    "cdp_theme_target_transition",
+                    "Renderer changed after installation was queued; retry remains safe",
+                    json!({
+                        "targetId": target.id,
+                        "location": safe_target_location(&target.url),
+                        "reason": reason,
+                        "retrySuppressed": false,
+                        "previousError": error.error.to_string(),
+                    }),
+                );
+                return Err(AppError::RendererTargetTransition(format!(
+                    "安装期间发生 {reason}，等待新主页面后重试"
+                )));
+            }
+            return Err(error.error);
+        }
         Err(error) => error.error,
     };
     match install_theme_attached(client, target, port, browser_id, payload, progress).await {
         Ok(installation) => Ok(installation),
-        Err(browser_error) if !browser_error.retry_safe => Err(browser_error.error),
+        Err(browser_error) if !browser_error.retry_safe => {
+            if let Some(reason) = terminal_retry_reason(client, target, port, browser_id).await {
+                emit_progress(
+                    progress,
+                    "warn",
+                    "cdp_theme_target_transition",
+                    "Renderer changed after installation was queued; retry remains safe",
+                    json!({
+                        "targetId": target.id,
+                        "location": safe_target_location(&target.url),
+                        "reason": reason,
+                        "retrySuppressed": false,
+                        "previousError": browser_error.error.to_string(),
+                    }),
+                );
+                Err(AppError::RendererTargetTransition(format!(
+                    "安装期间发生 {reason}，等待新主页面后重试"
+                )))
+            } else {
+                Err(browser_error.error)
+            }
+        }
         Err(browser_error) => Err(AppError::Runtime(format!(
             "CDP 页面直连与浏览器会话均未能开始安全安装；页面直连：{direct_error}；浏览器会话：{}",
             browser_error.error
         ))),
     }
+}
+
+async fn terminal_retry_reason(
+    client: &Client,
+    target: &CdpTarget,
+    port: u16,
+    browser_id: &str,
+) -> Option<&'static str> {
+    let targets = verified_targets(client, port, browser_id).await.ok()?;
+    let Some(current) = targets.into_iter().find(|item| item.id == target.id) else {
+        return Some("targetReplaced");
+    };
+    let fresh_probe = timeout(Duration::from_secs(3), async {
+        let mut session = CdpSession::connect_page(&current, port).await?;
+        let initialized = session.initialize_renderer(None).await;
+        if initialized.is_err() {
+            session = CdpSession::connect_page(&current, port).await?;
+        }
+        let probe = session
+            .evaluate(None, PROBE_EXPRESSION, Duration::from_secs(2))
+            .await?;
+        session.close().await;
+        Ok::<Value, AppError>(probe)
+    })
+    .await
+    .ok()?
+    .ok()?;
+    probe_is_codex(Some(&fresh_probe)).then_some("freshSessionResponsive")
 }
 
 async fn install_theme_direct(
@@ -1312,15 +1568,10 @@ async fn install_theme_direct_attempt(
             .await
             .map_err(CdpAttemptError::retry_safe)?;
     }
-    let probe = session
-        .evaluate(None, PROBE_EXPRESSION, RENDERER_PROBE_TIMEOUT)
+    session
+        .verify_stable_renderer(None)
         .await
         .map_err(CdpAttemptError::retry_safe)?;
-    if !probe_is_codex(Some(&probe)) {
-        return Err(CdpAttemptError::retry_safe(AppError::Runtime(
-            "页面直连探针未确认可注入的 Codex 文档".into(),
-        )));
-    }
     let result = session
         .install_theme(None, &target.id, payload, progress)
         .await;
@@ -1422,19 +1673,10 @@ async fn install_theme_attached_attempt(
             .await
             .map_err(CdpAttemptError::retry_safe)?;
     }
-    let probe = browser
-        .evaluate(
-            Some(session_id.as_str()),
-            PROBE_EXPRESSION,
-            RENDERER_PROBE_TIMEOUT,
-        )
+    browser
+        .verify_stable_renderer(Some(session_id.as_str()))
         .await
         .map_err(CdpAttemptError::retry_safe)?;
-    if !probe_is_codex(Some(&probe)) {
-        return Err(CdpAttemptError::retry_safe(AppError::Runtime(
-            "浏览器附加探针未确认可注入的 Codex 文档".into(),
-        )));
-    }
     let result = browser
         .install_theme(Some(session_id.as_str()), &target.id, payload, progress)
         .await;
@@ -1639,6 +1881,87 @@ fn probe_is_codex(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
+fn renderer_probe_is_presentable(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| value.pointer("/presentation/presentable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn renderer_navigation_epoch(value: &Value) -> Option<u64> {
+    value
+        .pointer("/document/navigationEpoch")
+        .and_then(Value::as_u64)
+}
+
+fn guarded_result_is_presentable(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| value.pointer("/presentation/presentable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn renderer_probe_score(value: &Value) -> u64 {
+    let focused = value
+        .pointer("/presentation/hasFocus")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let marker_count = ["shell", "sidebar", "composer", "main"]
+        .into_iter()
+        .filter(|marker| {
+            value
+                .pointer(&format!("/markers/{marker}"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count() as u64;
+    let element_count = value
+        .pointer("/document/elementCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(100_000);
+    (if focused { 1_000_000 } else { 0 }) + marker_count * 100_000 + element_count
+}
+
+fn renderer_presentation(value: &Value) -> Value {
+    json!({
+        "presentable": value.get("presentable").and_then(Value::as_bool),
+        "paintVerified": value.get("paintVerified").and_then(Value::as_bool),
+        "visibilityState": value.get("visibilityState").and_then(Value::as_str),
+        "hasFocus": value.get("hasFocus").and_then(Value::as_bool),
+        "viewportWidth": value.get("viewportWidth").and_then(Value::as_u64),
+        "viewportHeight": value.get("viewportHeight").and_then(Value::as_u64),
+        "surfaceReady": value.get("surfaceReady").and_then(Value::as_bool),
+        "navigationEpoch": value.get("navigationEpoch").and_then(Value::as_u64),
+    })
+}
+
+fn renderer_observation_report(
+    target: &CdpTarget,
+    probe: &Value,
+    transport: Option<CdpTransport>,
+    session_mode: Option<RendererSessionMode>,
+    error: Option<String>,
+) -> Value {
+    json!({
+        "targetId": target.id,
+        "location": safe_target_location(&target.url),
+        "codex": probe_is_codex(Some(probe)),
+        "presentable": renderer_probe_is_presentable(Some(probe)),
+        "visibilityState": probe.pointer("/presentation/visibilityState").and_then(Value::as_str),
+        "hasFocus": probe.pointer("/presentation/hasFocus").and_then(Value::as_bool),
+        "viewportWidth": probe.pointer("/presentation/viewportWidth").and_then(Value::as_u64),
+        "viewportHeight": probe.pointer("/presentation/viewportHeight").and_then(Value::as_u64),
+        "surfaceReady": probe.pointer("/presentation/surfaceReady").and_then(Value::as_bool),
+        "readyState": probe.pointer("/document/readyState").and_then(Value::as_str),
+        "elementCount": probe.pointer("/document/elementCount").and_then(Value::as_u64),
+        "navigationEpoch": probe.pointer("/document/navigationEpoch").and_then(Value::as_u64),
+        "probeTransport": transport.map(CdpTransport::as_str),
+        "probeSessionMode": session_mode.map(RendererSessionMode::as_str),
+        "error": error,
+    })
+}
+
 fn action_result_is_true(value: Option<&Value>) -> bool {
     value
         .and_then(|value| value.get("result"))
@@ -1653,6 +1976,8 @@ fn theme_install_result_is_confirmed(result: &Value) -> bool {
         "rootTagged",
         "artAttached",
         "chromeAttached",
+        "paintVerified",
+        "presentable",
     ]
     .into_iter()
     .all(|field| result.get(field).and_then(Value::as_bool) == Some(true))
@@ -1669,7 +1994,8 @@ fn theme_health_expression(theme_key: &str) -> AppResult<String> {
     state.ensure();
     const status = state.status();
     return Boolean(status?.installed && status?.styleAttached &&
-      status?.rootTagged && status?.artAttached && status?.chromeAttached);
+      status?.rootTagged && status?.artAttached && status?.chromeAttached &&
+      status?.paintVerified && status?.presentable);
   }} catch {{ return false; }}
 }})()"#
     ))
@@ -1677,7 +2003,7 @@ fn theme_health_expression(theme_key: &str) -> AppResult<String> {
 
 fn guarded_expression(action: &str) -> String {
     format!(
-        "(() => {{ const checked = ({PROBE_EXPRESSION}); if (!checked.codex) return checked; return {{ codex: true, result: ({action}) }}; }})()"
+        "(() => {{ const checked = ({PROBE_EXPRESSION}); if (!checked.codex) return checked; return {{ codex: true, presentation: checked.presentation, result: ({action}) }}; }})()"
     )
 }
 
@@ -1690,6 +2016,11 @@ fn valid_page_target(target: &CdpTarget, port: u16) -> bool {
         && document_url.scheme() == "app"
         && valid_identifier(&target.id)
         && validated_page_url(target, port).is_ok()
+}
+
+fn deduplicate_targets_by_id(targets: &mut Vec<CdpTarget>) {
+    let mut seen = HashSet::new();
+    targets.retain(|target| seen.insert(target.id.clone()));
 }
 
 fn target_priority(target: &CdpTarget) -> u8 {
@@ -1824,6 +2155,18 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_repeated_page_entries_before_injection() {
+        let first = target("ws://127.0.0.1:9341/devtools/page/page-1");
+        let mut second = target("ws://127.0.0.1:9341/devtools/page/page-2");
+        second.id = "page-2".into();
+        let mut targets = vec![first.clone(), first, second];
+        deduplicate_targets_by_id(&mut targets);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].id, "page-1");
+        assert_eq!(targets[1].id, "page-2");
+    }
+
+    #[test]
     fn flattened_commands_carry_the_attached_session_id() {
         let request = command_request(
             7,
@@ -1864,6 +2207,13 @@ mod tests {
     }
 
     #[test]
+    fn renderer_transitions_remain_distinct_from_terminal_failures() {
+        let error = AppError::RendererTargetTransition("target replaced".into());
+        assert!(error.is_renderer_target_transition());
+        assert!(!error.is_renderer_install_terminal());
+    }
+
+    #[test]
     fn staged_theme_acknowledgements_require_token_phase_and_exact_progress() {
         let value = json!({
             "accepted": true,
@@ -1901,6 +2251,7 @@ mod tests {
         let probe = guarded.find("if (!checked.codex)").unwrap();
         let action = guarded.find("window.__testAction").unwrap();
         assert!(probe < action);
+        assert!(guarded.contains("presentation: checked.presentation"));
     }
 
     #[test]
@@ -1908,13 +2259,42 @@ mod tests {
         let expression = theme_health_expression("source:night@1.0.0").unwrap();
         assert!(expression.contains("source:night@1.0.0"));
         assert!(expression.contains("state.ensure()"));
+        assert!(expression.contains("status?.paintVerified && status?.presentable"));
         assert!(!expression.contains("data:image"));
+    }
+
+    #[test]
+    fn renderer_selection_requires_a_visible_laid_out_surface() {
+        let visible = json!({
+            "codex": true,
+            "document": { "navigationEpoch": 42, "elementCount": 300 },
+            "presentation": {
+                "presentable": true,
+                "visibilityState": "visible",
+                "hasFocus": true,
+                "viewportWidth": 1280,
+                "viewportHeight": 800,
+                "surfaceReady": true,
+            },
+            "markers": { "shell": true, "sidebar": true, "composer": false, "main": true },
+        });
+        assert!(renderer_probe_is_presentable(Some(&visible)));
+        assert_eq!(renderer_navigation_epoch(&visible), Some(42));
+        assert!(renderer_probe_score(&visible) > 1_000_000);
+
+        let mut hidden = visible.clone();
+        hidden["presentation"]["presentable"] = Value::Bool(false);
+        hidden["presentation"]["visibilityState"] = Value::String("hidden".into());
+        assert!(!renderer_probe_is_presentable(Some(&hidden)));
     }
 
     #[test]
     fn diagnostic_probe_is_bounded_and_content_free() {
         assert!(PROBE_EXPRESSION.contains("slice(0, 24)"));
         assert!(PROBE_EXPRESSION.contains("elementCount"));
+        assert!(PROBE_EXPRESSION.contains("visibilityState === 'visible'"));
+        assert!(PROBE_EXPRESSION.contains("navigationEpoch"));
+        assert!(PROBE_EXPRESSION.contains("viewportWidth >= 320"));
         assert!(PROBE_EXPRESSION.contains("security.appProtocol && security.documentReady"));
         assert_eq!(DIAGNOSTIC_PROBE_TIMEOUT, Duration::from_secs(12));
         assert_eq!(DIAGNOSTIC_TARGET_LIMIT, 16);
@@ -1944,6 +2324,8 @@ mod tests {
             "rootTagged": true,
             "artAttached": true,
             "chromeAttached": true,
+            "paintVerified": true,
+            "presentable": true,
         });
         assert!(theme_install_result_is_confirmed(&value));
         let missing_style = json!({
@@ -1952,6 +2334,8 @@ mod tests {
             "rootTagged": true,
             "artAttached": true,
             "chromeAttached": true,
+            "paintVerified": true,
+            "presentable": true,
         });
         assert!(!theme_install_result_is_confirmed(&missing_style));
         let missing_chrome = json!({
@@ -1960,8 +2344,13 @@ mod tests {
             "rootTagged": true,
             "artAttached": true,
             "chromeAttached": false,
+            "paintVerified": true,
+            "presentable": true,
         });
         assert!(!theme_install_result_is_confirmed(&missing_chrome));
+        let mut hidden = value;
+        hidden["presentable"] = Value::Bool(false);
+        assert!(!theme_install_result_is_confirmed(&hidden));
     }
 
     #[test]

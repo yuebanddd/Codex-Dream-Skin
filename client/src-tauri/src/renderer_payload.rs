@@ -105,6 +105,9 @@ html.lumadrobe-theme .composer-surface-chrome {
 }
 "#;
 
+const PAINT_PROBE_CSS: &str =
+    "html.lumadrobe-theme { --lumadrobe-paint-probe: 1 !important; }";
+
 pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     let background = read_verified_asset(
         installed,
@@ -121,7 +124,7 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     } else {
         String::new()
     };
-    let css = format!("{BASE_CSS}\n{custom_css}");
+    let css = format!("{BASE_CSS}\n{custom_css}\n{PAINT_PROBE_CSS}\n");
     let theme_key = format!(
         "{}:{}@{}",
         installed.source_id, installed.skin_id, installed.version
@@ -366,6 +369,19 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
   const status = () => {{
     const root = document.documentElement;
     const style = document.getElementById(STYLE_ID);
+    const viewportWidth = Math.max(0, Math.round(window.innerWidth || 0));
+    const viewportHeight = Math.max(0, Math.round(window.innerHeight || 0));
+    const surfaceReady = Boolean(document.querySelector(
+      'main,[role="main"],aside.app-shell-left-panel,.composer-surface-chrome'
+    ));
+    let paintVerified = false;
+    try {{
+      paintVerified = getComputedStyle(root)
+        .getPropertyValue("--lumadrobe-paint-probe").trim() === "1";
+    }} catch {{}}
+    const visibilityState = document.visibilityState || "unknown";
+    const presentable = visibilityState === "visible" && viewportWidth >= 320 &&
+      viewportHeight >= 240 && surfaceReady;
     return {{
       installed: Boolean(window[STATE_KEY]?.runtimeVersion === RUNTIME_VERSION &&
         window[STATE_KEY]?.themeKey === theme.key),
@@ -373,6 +389,16 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
       rootTagged: Boolean(root && ROOT_CLASSES.every((name) => root.classList.contains(name))),
       artAttached: Boolean(root && ART_PROPERTIES.every((name) => root.style.getPropertyValue(name))),
       chromeAttached: chromeIsReady(),
+      paintVerified,
+      presentable,
+      visibilityState,
+      hasFocus: document.hasFocus(),
+      viewportWidth,
+      viewportHeight,
+      surfaceReady,
+      navigationEpoch: Number.isFinite(performance.timeOrigin)
+        ? Math.round(performance.timeOrigin)
+        : null,
     }};
   }};
 
@@ -567,6 +593,9 @@ mod tests {
         assert!(payload.engine().contains("rootTagged"));
         assert!(payload.engine().contains("artAttached"));
         assert!(payload.engine().contains("chromeAttached"));
+        assert!(payload.engine().contains("paintVerified"));
+        assert!(payload.engine().contains("presentable"));
+        assert!(payload.engine().contains("--lumadrobe-paint-probe"));
         assert!(payload.engine().contains("codex-dream-skin-chrome"));
         assert!(payload.engine().contains("chromeIsReady"));
         let appearance = payload

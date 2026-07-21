@@ -22,11 +22,17 @@ pub enum AppError {
     Runtime(String),
     #[error("皮肤引擎无法继续：{0}")]
     RendererInstallTerminal(String),
+    #[error("Codex 渲染页正在切换：{0}")]
+    RendererTargetTransition(String),
 }
 
 impl AppError {
     pub(crate) fn is_renderer_install_terminal(&self) -> bool {
         matches!(self, Self::RendererInstallTerminal(_))
+    }
+
+    pub(crate) fn is_renderer_target_transition(&self) -> bool {
+        matches!(self, Self::RendererTargetTransition(_))
     }
 }
 
