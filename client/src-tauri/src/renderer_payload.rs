@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 const IMAGE_LIMIT: u64 = 32 * 1024 * 1024;
 const CSS_LIMIT: u64 = 1024 * 1024;
 pub(crate) const RENDERER_ENGINE_VERSION: u64 = 2;
+pub(crate) const RENDERER_RUNTIME_VERSION: u64 = 4;
 
 #[derive(Debug, Clone)]
 pub struct RendererPayload {
@@ -138,6 +139,7 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     let theme_json = serde_json::to_string(&theme)?;
 
     let engine_version = RENDERER_ENGINE_VERSION;
+    let runtime_version = RENDERER_RUNTIME_VERSION;
     let engine = format!(
         r#"(() => {{
   const ENGINE_KEY = "__LUMADROBE_ENGINE__";
@@ -149,7 +151,7 @@ pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
   }}
   const install = (theme, cssText, artBlob) => {{
   const STATE_KEY = "__LUMADROBE_RUNTIME__";
-  const RUNTIME_VERSION = 3;
+  const RUNTIME_VERSION = {runtime_version};
   const STYLE_ID = "lumadrobe-theme-style";
   const CHROME_ID = "codex-dream-skin-chrome";
   const ROOT_CLASSES = ["lumadrobe-theme", "codex-dream-skin"];
@@ -581,8 +583,12 @@ mod tests {
         assert!(payload.engine().contains("__LUMADROBE_RUNTIME__"));
         assert!(payload.engine().contains("__LUMADROBE_ENGINE__"));
         assert_eq!(RENDERER_ENGINE_VERSION, 2);
+        assert_eq!(RENDERER_RUNTIME_VERSION, 4);
         assert!(payload.engine().contains("const ENGINE_VERSION = 2;"));
+        assert!(payload.engine().contains("const RUNTIME_VERSION = 4;"));
         assert!(payload.engine().contains("runtimeVersion: RUNTIME_VERSION"));
+        assert!(payload.engine().contains("previous?.runtimeVersion === RUNTIME_VERSION"));
+        assert!(payload.engine().contains("previous?.cleanup?.()"));
         assert!(!payload.engine().contains("data:image/png;base64"));
         assert_eq!(payload.theme_key(), "source:night@1.0.0");
         assert!(payload.theme_json().contains("source:night@1.0.0"));

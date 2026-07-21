@@ -405,8 +405,7 @@ impl CdpSession {
                 )))
             })?;
         if engine.get("ready").and_then(Value::as_bool) != Some(true)
-            || engine.get("engineVersion").and_then(Value::as_u64)
-                != Some(RENDERER_ENGINE_VERSION)
+            || engine.get("engineVersion").and_then(Value::as_u64) != Some(RENDERER_ENGINE_VERSION)
         {
             return Err(CdpAttemptError::retry_safe(AppError::Runtime(
                 "CDP 主题引擎未返回有效确认".into(),
