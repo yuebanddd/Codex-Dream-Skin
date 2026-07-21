@@ -105,8 +105,7 @@ html.lumadrobe-theme .composer-surface-chrome {
 }
 "#;
 
-const PAINT_PROBE_CSS: &str =
-    "html.lumadrobe-theme { --lumadrobe-paint-probe: 1 !important; }";
+const PAINT_PROBE_CSS: &str = "html.lumadrobe-theme { --lumadrobe-paint-probe: 1 !important; }";
 
 pub fn build_payload(installed: &InstalledSkin) -> AppResult<RendererPayload> {
     let background = read_verified_asset(
