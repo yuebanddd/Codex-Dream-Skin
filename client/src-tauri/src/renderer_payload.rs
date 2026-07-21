@@ -587,7 +587,9 @@ mod tests {
         assert!(payload.engine().contains("const ENGINE_VERSION = 2;"));
         assert!(payload.engine().contains("const RUNTIME_VERSION = 4;"));
         assert!(payload.engine().contains("runtimeVersion: RUNTIME_VERSION"));
-        assert!(payload.engine().contains("previous?.runtimeVersion === RUNTIME_VERSION"));
+        assert!(payload
+            .engine()
+            .contains("previous?.runtimeVersion === RUNTIME_VERSION"));
         assert!(payload.engine().contains("previous?.cleanup?.()"));
         assert!(!payload.engine().contains("data:image/png;base64"));
         assert_eq!(payload.theme_key(), "source:night@1.0.0");

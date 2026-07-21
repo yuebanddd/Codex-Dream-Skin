@@ -23,6 +23,7 @@ const TRANSFER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const INSTALL_START_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTALL_POLL_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTALL_DEADLINE: Duration = Duration::from_secs(25);
+const TERMINAL_TRANSITION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(125);
 const TARGET_STABILITY_DELAY: Duration = Duration::from_millis(300);
 const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
@@ -1528,12 +1529,19 @@ async fn terminal_retry_reason(
     let Some(current) = targets.into_iter().find(|item| item.id == target.id) else {
         return Some("targetReplaced");
     };
-    let evaluation = match transport {
-        CdpTransport::DirectPage => evaluate_many_direct(&current, port, &[PROBE_EXPRESSION]).await,
-        CdpTransport::BrowserSession => {
-            evaluate_many_attached(client, &current, port, browser_id, &[PROBE_EXPRESSION]).await
+    let expressions = [PROBE_EXPRESSION];
+    let evaluation = timeout(TERMINAL_TRANSITION_PROBE_TIMEOUT, async {
+        match transport {
+            CdpTransport::DirectPage => {
+                evaluate_many_direct(&current, port, &expressions).await
+            }
+            CdpTransport::BrowserSession => {
+                evaluate_many_attached(client, &current, port, browser_id, &expressions).await
+            }
         }
-    }
+    })
+    .await
+    .ok()?
     .ok()?;
     let fresh_probe = evaluation.values.into_iter().next()?;
     terminal_retry_reason_for_probe(navigation_epoch, &fresh_probe)
@@ -2244,6 +2252,7 @@ mod tests {
         assert_eq!(RENDERER_SESSION_DOMAINS, ["Runtime.enable", "Page.enable"]);
         assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(10));
         assert_eq!(RENDERER_PROBE_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(TERMINAL_TRANSITION_PROBE_TIMEOUT, Duration::from_secs(5));
     }
 
     #[test]
