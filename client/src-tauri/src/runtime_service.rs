@@ -10,6 +10,7 @@ use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Child;
@@ -236,7 +237,10 @@ impl RuntimeManager {
             "info",
             "payload_ready",
             "Renderer payload validated",
-            json!({ "payloadBytes": payload.len() }),
+            json!({
+                "payloadBytes": payload.len(),
+                "payloadSha256": format!("{:x}", Sha256::digest(payload.as_bytes())),
+            }),
         );
         {
             let mut inner = self.inner.lock().await;
@@ -345,6 +349,8 @@ impl RuntimeManager {
                     "browserSessionTargets": injection.browser_session_targets,
                     "initializedSessionTargets": injection.initialized_session_targets,
                     "uninitializedFallbackTargets": injection.uninitialized_fallback_targets,
+                    "chunkedTransferTargets": injection.chunked_transfer_targets,
+                    "transferredChunks": injection.transferred_chunks,
                 }),
             );
             (
@@ -550,6 +556,8 @@ impl RuntimeManager {
                     "browserSessionTargets": injection.browser_session_targets,
                     "initializedSessionTargets": injection.initialized_session_targets,
                     "uninitializedFallbackTargets": injection.uninitialized_fallback_targets,
+                    "chunkedTransferTargets": injection.chunked_transfer_targets,
+                    "transferredChunks": injection.transferred_chunks,
                 }),
             );
             record.browser_id = browser_id;

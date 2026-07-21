@@ -1,3 +1,4 @@
+use crate::cdp_transfer::{requires_chunking, TransferPlan};
 use crate::error::{AppError, AppResult};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
@@ -15,6 +16,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const RENDERER_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSFER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSFER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const DIAGNOSTIC_PROBE_TIMEOUT: Duration = Duration::from_secs(12);
 const DIAGNOSTIC_TARGET_LIMIT: usize = 16;
 const DIAGNOSTIC_PROBE_LIMIT: usize = 4;
@@ -145,11 +148,33 @@ struct CdpEvaluation {
     values: Vec<Value>,
     transport: CdpTransport,
     session_mode: RendererSessionMode,
+    transfer: TransferStats,
 }
 
 struct SessionEvaluation {
     values: Vec<Value>,
     mode: RendererSessionMode,
+    transfer: TransferStats,
+}
+
+struct EvaluatedValue {
+    value: Value,
+    transfer: TransferStats,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TransferStats {
+    chunked_expressions: usize,
+    chunks: usize,
+}
+
+impl TransferStats {
+    fn add(&mut self, other: Self) {
+        self.chunked_expressions = self
+            .chunked_expressions
+            .saturating_add(other.chunked_expressions);
+        self.chunks = self.chunks.saturating_add(other.chunks);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +184,8 @@ pub struct CdpApplyOutcome {
     pub browser_session_targets: usize,
     pub initialized_session_targets: usize,
     pub uninitialized_fallback_targets: usize,
+    pub chunked_transfer_targets: usize,
+    pub transferred_chunks: usize,
 }
 
 impl CdpSession {
@@ -233,6 +260,98 @@ impl CdpSession {
             .pointer("/result/value")
             .cloned()
             .unwrap_or(Value::Null))
+    }
+
+    async fn evaluate_expression(
+        &mut self,
+        session_id: Option<&str>,
+        expression: &str,
+    ) -> AppResult<EvaluatedValue> {
+        if !requires_chunking(expression) {
+            return Ok(EvaluatedValue {
+                value: self
+                    .evaluate(session_id, expression, EVALUATE_TIMEOUT)
+                    .await?,
+                transfer: TransferStats::default(),
+            });
+        }
+
+        let plan = TransferPlan::new(expression);
+        let digest = plan.sha256().to_string();
+        let initialize = plan.initialize_expression();
+        let initialized = match self
+            .evaluate(session_id, &initialize, TRANSFER_COMMAND_TIMEOUT)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                self.cleanup_transfer(session_id, &plan).await;
+                return Err(AppError::Runtime(format!(
+                    "CDP 分片传输初始化失败，载荷 {} bytes，摘要 {digest}：{error}",
+                    plan.original_bytes()
+                )));
+            }
+        };
+        if !transfer_acknowledged(&initialized, 0) {
+            self.cleanup_transfer(session_id, &plan).await;
+            return Err(AppError::Runtime(format!(
+                "CDP 分片传输初始化未被渲染器确认，摘要 {digest}"
+            )));
+        }
+
+        for index in 0..plan.chunk_count() {
+            let append = plan.append_expression(index);
+            let acknowledgement = match self
+                .evaluate(session_id, &append, TRANSFER_COMMAND_TIMEOUT)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    self.cleanup_transfer(session_id, &plan).await;
+                    return Err(AppError::Runtime(format!(
+                        "CDP 分片传输失败：分片 {}/{}，载荷 {} bytes，摘要 {digest}：{error}",
+                        index + 1,
+                        plan.chunk_count(),
+                        plan.original_bytes()
+                    )));
+                }
+            };
+            if !transfer_acknowledged(&acknowledgement, index + 1) {
+                self.cleanup_transfer(session_id, &plan).await;
+                return Err(AppError::Runtime(format!(
+                    "CDP 分片传输确认无效：分片 {}/{}，摘要 {digest}",
+                    index + 1,
+                    plan.chunk_count()
+                )));
+            }
+        }
+
+        let commit = plan.commit_expression();
+        let value = match self.evaluate(session_id, &commit, EVALUATE_TIMEOUT).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.cleanup_transfer(session_id, &plan).await;
+                return Err(AppError::Runtime(format!(
+                    "CDP 分片载荷校验或执行失败，共 {} 个分片、{} bytes，摘要 {digest}：{error}",
+                    plan.chunk_count(),
+                    plan.original_bytes()
+                )));
+            }
+        };
+        Ok(EvaluatedValue {
+            value,
+            transfer: TransferStats {
+                chunked_expressions: 1,
+                chunks: plan.chunk_count(),
+            },
+        })
+    }
+
+    async fn cleanup_transfer(&mut self, session_id: Option<&str>, plan: &TransferPlan) {
+        let cleanup = plan.cleanup_expression();
+        let _ = self
+            .evaluate(session_id, &cleanup, TRANSFER_CLEANUP_TIMEOUT)
+            .await;
     }
 
     async fn initialize_renderer(&mut self, session_id: Option<&str>) -> AppResult<()> {
@@ -503,6 +622,8 @@ pub async fn apply_to_verified_targets(
     let mut browser_session_targets = 0;
     let mut initialized_session_targets = 0;
     let mut uninitialized_fallback_targets = 0;
+    let mut chunked_transfer_targets = 0;
+    let mut transferred_chunks: usize = 0;
     let mut last_error = None;
     let guarded_payload = guarded_expression(payload);
     for target in targets {
@@ -521,6 +642,11 @@ pub async fn apply_to_verified_targets(
                     RendererSessionMode::UninitializedFallback => {
                         uninitialized_fallback_targets += 1
                     }
+                }
+                if evaluation.transfer.chunked_expressions > 0 {
+                    chunked_transfer_targets += 1;
+                    transferred_chunks =
+                        transferred_chunks.saturating_add(evaluation.transfer.chunks);
                 }
             }
             Ok(evaluation) if probe_is_codex(evaluation.values.first()) => {
@@ -542,6 +668,8 @@ pub async fn apply_to_verified_targets(
         browser_session_targets,
         initialized_session_targets,
         uninitialized_fallback_targets,
+        chunked_transfer_targets,
+        transferred_chunks,
     })
 }
 
@@ -667,6 +795,7 @@ async fn evaluate_many(
                 values: evaluation.values,
                 transport: CdpTransport::DirectPage,
                 session_mode: evaluation.mode,
+                transfer: evaluation.transfer,
             })
         }
         Err(error) => error,
@@ -676,6 +805,7 @@ async fn evaluate_many(
             values: evaluation.values,
             transport: CdpTransport::BrowserSession,
             session_mode: evaluation.mode,
+            transfer: evaluation.transfer,
         }),
         Err(browser_error) => Err(AppError::Runtime(format!(
             "CDP 页面直连与浏览器会话均失败；页面直连：{direct_error}；浏览器会话：{browser_error}"
@@ -690,18 +820,20 @@ async fn evaluate_many_direct(
 ) -> AppResult<SessionEvaluation> {
     let initialized_error =
         match evaluate_many_direct_attempt(target, port, expressions, true).await {
-            Ok(values) => {
+            Ok((values, transfer)) => {
                 return Ok(SessionEvaluation {
                     values,
                     mode: RendererSessionMode::Initialized,
+                    transfer,
                 })
             }
             Err(error) => error,
         };
     match evaluate_many_direct_attempt(target, port, expressions, false).await {
-        Ok(values) => Ok(SessionEvaluation {
+        Ok((values, transfer)) => Ok(SessionEvaluation {
             values,
             mode: RendererSessionMode::UninitializedFallback,
+            transfer,
         }),
         Err(fallback_error) => Err(AppError::Runtime(format!(
             "页面初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{fallback_error}"
@@ -714,7 +846,7 @@ async fn evaluate_many_direct_attempt(
     port: u16,
     expressions: &[&str],
     initialize: bool,
-) -> AppResult<Vec<Value>> {
+) -> AppResult<(Vec<Value>, TransferStats)> {
     let mut session = CdpSession::connect_page(target, port).await?;
     if initialize {
         session.initialize_renderer(None).await?;
@@ -728,11 +860,14 @@ async fn evaluate_many_direct_attempt(
         ));
     }
     let mut values = Vec::with_capacity(expressions.len());
+    let mut transfer = TransferStats::default();
     for expression in expressions {
-        values.push(session.evaluate(None, expression, EVALUATE_TIMEOUT).await?);
+        let evaluated = session.evaluate_expression(None, expression).await?;
+        values.push(evaluated.value);
+        transfer.add(evaluated.transfer);
     }
     session.close().await;
-    Ok(values)
+    Ok((values, transfer))
 }
 
 async fn evaluate_many_attached(
@@ -746,19 +881,21 @@ async fn evaluate_many_attached(
         match evaluate_many_attached_attempt(client, target, port, browser_id, expressions, true)
             .await
         {
-            Ok(values) => {
+            Ok((values, transfer)) => {
                 return Ok(SessionEvaluation {
                     values,
                     mode: RendererSessionMode::Initialized,
+                    transfer,
                 })
             }
             Err(error) => error,
         };
     match evaluate_many_attached_attempt(client, target, port, browser_id, expressions, false).await
     {
-        Ok(values) => Ok(SessionEvaluation {
+        Ok((values, transfer)) => Ok(SessionEvaluation {
             values,
             mode: RendererSessionMode::UninitializedFallback,
+            transfer,
         }),
         Err(fallback_error) => Err(AppError::Runtime(format!(
             "浏览器初始化会话与无初始化回退均失败；初始化会话：{initialized_error}；无初始化回退：{fallback_error}"
@@ -773,7 +910,7 @@ async fn evaluate_many_attached_attempt(
     browser_id: &str,
     expressions: &[&str],
     initialize: bool,
-) -> AppResult<Vec<Value>> {
+) -> AppResult<(Vec<Value>, TransferStats)> {
     let mut browser = CdpSession::connect_browser(client, port, browser_id).await?;
     let attached = browser
         .command(
@@ -808,14 +945,15 @@ async fn evaluate_many_attached_attempt(
             ));
         }
         let mut values = Vec::with_capacity(expressions.len());
+        let mut transfer = TransferStats::default();
         for expression in expressions {
-            values.push(
-                browser
-                    .evaluate(Some(session_id.as_str()), expression, EVALUATE_TIMEOUT)
-                    .await?,
-            );
+            let evaluated = browser
+                .evaluate_expression(Some(session_id.as_str()), expression)
+                .await?;
+            values.push(evaluated.value);
+            transfer.add(evaluated.transfer);
         }
-        Ok(values)
+        Ok((values, transfer))
     }
     .await;
     let _ = browser
@@ -835,6 +973,12 @@ fn probe_is_codex(value: Option<&Value>) -> bool {
         .and_then(|value| value.get("codex"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn transfer_acknowledged(value: &Value, expected_chunks: usize) -> bool {
+    value.get("accepted").and_then(Value::as_bool) == Some(true)
+        && value.get("receivedChunks").and_then(Value::as_u64)
+            == u64::try_from(expected_chunks).ok()
 }
 
 fn action_result_is_true(value: Option<&Value>) -> bool {
@@ -1058,6 +1202,22 @@ mod tests {
             RendererSessionMode::UninitializedFallback.as_str(),
             "uninitializedFallback"
         );
+    }
+
+    #[test]
+    fn chunk_acknowledgements_require_acceptance_and_exact_progress() {
+        assert!(transfer_acknowledged(
+            &json!({ "accepted": true, "receivedChunks": 2 }),
+            2
+        ));
+        assert!(!transfer_acknowledged(
+            &json!({ "accepted": true, "receivedChunks": 1 }),
+            2
+        ));
+        assert!(!transfer_acknowledged(
+            &json!({ "accepted": false, "receivedChunks": 2 }),
+            2
+        ));
     }
 
     #[test]
